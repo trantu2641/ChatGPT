@@ -1,342 +1,423 @@
-import SwiftUI import WebKit
+import SwiftUI
+import WebKit
+import UIKit
 
-struct ContentView: View { @State private var webView: WKWebView?
+struct ContentView: View {
+    @State private var webView: WKWebView?
+    @State private var isLoading = true
+    @State private var errorMessage: String?
 
+    var body: some View {
+        ZStack {
+            Color(red: 0.07, green: 0.07, blue: 0.07)
+                .ignoresSafeArea()
 
-var body: some View {
-    ChatGPTWebView(webView: $webView)
-        .background(Color(red: 0.07, green: 0.07, blue: 0.07))
-        .ignoresSafeArea(.container, edges: [.top, .bottom])
+            ChatGPTWebView(
+                webView: $webView,
+                isLoading: $isLoading,
+                errorMessage: $errorMessage
+            )
+            .ignoresSafeArea()
+
+            if isLoading {
+                ProgressView()
+                    .tint(.white)
+                    .scaleEffect(1.2)
+                    .padding(24)
+                    .background(
+                        Color.black.opacity(0.45),
+                        in: RoundedRectangle(cornerRadius: 16)
+                    )
+                    .allowsHitTesting(false)
+            }
+
+            if let message = errorMessage {
+                VStack(spacing: 16) {
+                    Image(systemName: "wifi.exclamationmark")
+                        .font(.system(size: 38))
+                        .foregroundStyle(.white)
+
+                    Text("Không thể tải ChatGPT")
+                        .font(.headline)
+                        .foregroundStyle(.white)
+
+                    Text(message)
+                        .font(.subheadline)
+                        .foregroundStyle(.white.opacity(0.75))
+                        .multilineTextAlignment(.center)
+
+                    Button {
+                        errorMessage = nil
+                        isLoading = true
+
+                        if let webView {
+                            if webView.url != nil {
+                                webView.reload()
+                            } else {
+                                webView.load(
+                                    URLRequest(
+                                        url: URL(
+                                            string: "https://chatgpt.com/"
+                                        )!
+                                    )
+                                )
+                            }
+                        }
+                    } label: {
+                        Label("Thử lại", systemImage: "arrow.clockwise")
+                            .fontWeight(.semibold)
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 24)
+                            .padding(.vertical, 12)
+                            .background(
+                                Color.white.opacity(0.15),
+                                in: Capsule()
+                            )
+                    }
+                }
+                .padding(28)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .background(Color(red: 0.07, green: 0.07, blue: 0.07))
+            }
+        }
+        .preferredColorScheme(.dark)
+    }
 }
-}
 
-private struct ChatGPTWebView: UIViewRepresentable { @Binding var webView: WKWebView?
+// MARK: - ChatGPT WebView
 
+private struct ChatGPTWebView: UIViewRepresentable {
+    @Binding var webView: WKWebView?
+    @Binding var isLoading: Bool
+    @Binding var errorMessage: String?
 
-func makeCoordinator() -> Coordinator {
-    Coordinator()
-}
+    func makeCoordinator() -> Coordinator {
+        Coordinator(
+            onLoadingChange: { loading in
+                DispatchQueue.main.async {
+                    isLoading = loading
+                }
+            },
+            onError: { message in
+                DispatchQueue.main.async {
+                    errorMessage = message
+                }
+            }
+        )
+    }
 
-func makeUIView(context: Context) -> WKWebView {
-    let contentController = WKUserContentController()
+    func makeUIView(context: Context) -> WKWebView {
+        let configuration = WKWebViewConfiguration()
 
-    contentController.addUserScript(
-        WKUserScript(
+        configuration.allowsInlineMediaPlayback = true
+        configuration.websiteDataStore = .default()
+
+        let contentController = WKUserContentController()
+
+        let script = WKUserScript(
             source: Self.interfaceScript,
             injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
+            forMainFrameOnly: true
         )
-    )
 
-    let configuration = WKWebViewConfiguration()
-    configuration.userContentController = contentController
-    configuration.allowsInlineMediaPlayback = true
+        contentController.addUserScript(script)
+        configuration.userContentController = contentController
 
-    let view = WKWebView(
-        frame: .zero,
-        configuration: configuration
-    )
+        let view = WKWebView(
+            frame: .zero,
+            configuration: configuration
+        )
 
-    view.navigationDelegate = context.coordinator
-    view.uiDelegate = context.coordinator
-    view.allowsBackForwardNavigationGestures = true
+        view.navigationDelegate = context.coordinator
+        view.uiDelegate = context.coordinator
 
-    view.scrollView.showsVerticalScrollIndicator = false
-    view.scrollView.showsHorizontalScrollIndicator = false
-    view.scrollView.keyboardDismissMode = .interactive
+        view.allowsBackForwardNavigationGestures = true
+        view.isOpaque = false
+        view.backgroundColor = UIColor(
+            red: 0.07,
+            green: 0.07,
+            blue: 0.07,
+            alpha: 1
+        )
 
-    view.isOpaque = false
-    view.backgroundColor = UIColor(
-        red: 0.07,
-        green: 0.07,
-        blue: 0.07,
-        alpha: 1
-    )
-    view.scrollView.backgroundColor = view.backgroundColor
+        view.scrollView.backgroundColor = view.backgroundColor
+        view.scrollView.isOpaque = false
+        view.scrollView.showsVerticalScrollIndicator = false
+        view.scrollView.showsHorizontalScrollIndicator = false
+        view.scrollView.keyboardDismissMode = .interactive
 
-    context.coordinator.webView = view
-    webView = view
+        // Tránh trì hoãn thao tác cuộn không cần thiết.
+        view.scrollView.delaysContentTouches = false
 
-    if let url = URL(string: "https://chatgpt.com/") {
-        view.load(URLRequest(url: url))
+        context.coordinator.webView = view
+
+        webView = view
+        isLoading = true
+        errorMessage = nil
+
+        var request = URLRequest(
+            url: URL(string: "https://chatgpt.com/")!
+        )
+
+        request.cachePolicy = .useProtocolCachePolicy
+        request.timeoutInterval = 60
+
+        view.load(request)
+
+        return view
     }
 
-    return view
-}
-
-func updateUIView(
-    _ uiView: WKWebView,
-    context: Context
-) {
-    uiView.scrollView.showsVerticalScrollIndicator = false
-    uiView.scrollView.showsHorizontalScrollIndicator = false
-}
-
-// MARK: - ChatGPT interface
-
-static let interfaceScript = """
-(() => {
-    if (window.__chatGPTInterfaceFixInstalled) {
-        return;
+    func updateUIView(
+        _ uiView: WKWebView,
+        context: Context
+    ) {
+        // Không gọi load() tại đây.
+        // SwiftUI có thể gọi updateUIView nhiều lần.
+        // Tải lại tại đây sẽ gây giật lag và mất trạng thái trang.
+        uiView.scrollView.showsVerticalScrollIndicator = false
+        uiView.scrollView.showsHorizontalScrollIndicator = false
     }
 
-    window.__chatGPTInterfaceFixInstalled = true;
+    // MARK: - Lightweight JavaScript
 
-    const STYLE_ID = 'chatgpt-ios-interface-fixes';
+    private static let interfaceScript = """
+    (() => {
+        'use strict';
 
-    const CSS = `
-        html,
-        body,
-        * {
-            scrollbar-width: none !important;
-            -ms-overflow-style: none !important;
-        }
-
-        ::-webkit-scrollbar {
-            display: none !important;
-            width: 0 !important;
-            height: 0 !important;
-        }
-
-        button,
-        [role="button"] {
-            -webkit-tap-highlight-color: transparent;
-        }
-
-        [data-chatgpt-ios-fixed-header="true"] {
-            position: sticky !important;
-            top: 0 !important;
-            z-index: 9999 !important;
-            flex-shrink: 0 !important;
-            pointer-events: auto !important;
-            isolation: isolate !important;
-        }
-
-        [data-chatgpt-ios-fixed-header="true"] button,
-        [data-chatgpt-ios-fixed-header="true"] [role="button"] {
-            pointer-events: auto !important;
-            touch-action: manipulation !important;
-        }
-    `;
-
-    function installStyle() {
-        if (!document.documentElement) {
+        if (window.__chatGPTInterfaceFixInstalled) {
             return;
         }
 
-        let style = document.getElementById(STYLE_ID);
+        window.__chatGPTInterfaceFixInstalled = true;
 
-        if (!style) {
-            style = document.createElement('style');
-            style.id = STYLE_ID;
+        const STYLE_ID = 'chatgpt-ios-interface-fixes';
+        let observer = null;
+        let scheduled = false;
+        let lastHeader = null;
 
-            (document.head || document.documentElement)
-                .appendChild(style);
-        }
-
-        if (style.textContent !== CSS) {
-            style.textContent = CSS;
-        }
-    }
-
-    function isVisible(element) {
-        if (!(element instanceof HTMLElement)) {
-            return false;
-        }
-
-        const rect = element.getBoundingClientRect();
-        const css = getComputedStyle(element);
-
-        return rect.width > 0 &&
-               rect.height > 0 &&
-               css.display !== 'none' &&
-               css.visibility !== 'hidden';
-    }
-
-    function findMenuButton() {
-        const selectors = [
-            'button[data-testid="open-sidebar-button"]',
-            'button[data-testid*="sidebar"]',
-            'button[aria-label*="sidebar" i]',
-            'button[aria-label*="side bar" i]',
-            'button[aria-label*="menu" i]',
-            'button[aria-label*="lịch sử" i]',
-            'button[aria-label*="thanh bên" i]',
-            '[role="button"][aria-label*="sidebar" i]',
-            '[role="button"][aria-label*="menu" i]'
-        ];
-
-        for (const selector of selectors) {
-            let elements;
-
-            try {
-                elements = document.querySelectorAll(selector);
-            } catch (_) {
-                continue;
+        const CSS = `
+            html,
+            body {
+                scrollbar-width: none !important;
+                -ms-overflow-style: none !important;
             }
 
-            for (const element of elements) {
-                if (isVisible(element)) {
-                    return element;
+            ::-webkit-scrollbar {
+                display: none !important;
+                width: 0 !important;
+                height: 0 !important;
+            }
+
+            button,
+            [role="button"] {
+                -webkit-tap-highlight-color: transparent;
+            }
+
+            [data-chatgpt-ios-fixed-header="true"] {
+                position: sticky !important;
+                top: 0 !important;
+                z-index: 100 !important;
+                flex-shrink: 0 !important;
+            }
+
+            [data-chatgpt-ios-fixed-header="true"] button,
+            [data-chatgpt-ios-fixed-header="true"] [role="button"] {
+                pointer-events: auto !important;
+                touch-action: manipulation !important;
+            }
+        `;
+
+        function installStyle() {
+            if (!document.head) {
+                return;
+            }
+
+            let style = document.getElementById(STYLE_ID);
+
+            if (!style) {
+                style = document.createElement('style');
+                style.id = STYLE_ID;
+                style.textContent = CSS;
+                document.head.appendChild(style);
+            }
+        }
+
+        function isVisible(element) {
+            if (!(element instanceof HTMLElement)) {
+                return false;
+            }
+
+            const rect = element.getBoundingClientRect();
+
+            return rect.width > 0 &&
+                   rect.height > 0 &&
+                   getComputedStyle(element).display !== 'none' &&
+                   getComputedStyle(element).visibility !== 'hidden';
+        }
+
+        function findMenuButton() {
+            const selectors = [
+                'button[data-testid="open-sidebar-button"]',
+                'button[data-testid*="sidebar"]',
+                'button[aria-label*="sidebar" i]',
+                'button[aria-label*="side bar" i]',
+                'button[aria-label*="menu" i]',
+                'button[aria-label*="lịch sử" i]',
+                'button[aria-label*="thanh bên" i]',
+                '[role="button"][aria-label*="sidebar" i]',
+                '[role="button"][aria-label*="menu" i]'
+            ];
+
+            for (const selector of selectors) {
+                let elements;
+
+                try {
+                    elements = document.querySelectorAll(selector);
+                } catch (_) {
+                    continue;
+                }
+
+                for (const element of elements) {
+                    if (isVisible(element)) {
+                        return element;
+                    }
                 }
             }
-        }
 
-        return null;
-    }
-
-    function findHeader(button) {
-        if (!button) {
             return null;
         }
 
-        const viewportWidth =
-            document.documentElement.clientWidth ||
-            window.innerWidth;
-
-        let current = button.parentElement;
-        let candidate = null;
-        let depth = 0;
-
-        while (
-            current &&
-            current !== document.body &&
-            depth < 8
-        ) {
-            const rect = current.getBoundingClientRect();
-
-            if (
-                rect.width >= viewportWidth * 0.70 &&
-                rect.height >= 36 &&
-                rect.height <= 120 &&
-                rect.top >= -10 &&
-                rect.top < 150
-            ) {
-                candidate = current;
+        function findHeader(button) {
+            if (!button) {
+                return null;
             }
 
-            if (
-                candidate &&
-                rect.width >= viewportWidth * 0.85 &&
-                rect.height >= 40 &&
-                rect.height <= 100
+            const viewportWidth =
+                document.documentElement.clientWidth ||
+                window.innerWidth;
+
+            let current = button.parentElement;
+            let candidate = null;
+            let depth = 0;
+
+            while (
+                current &&
+                current !== document.body &&
+                depth < 6
             ) {
-                break;
+                const rect = current.getBoundingClientRect();
+
+                if (
+                    rect.width >= viewportWidth * 0.75 &&
+                    rect.height >= 36 &&
+                    rect.height <= 120 &&
+                    rect.top >= -10 &&
+                    rect.top < 150
+                ) {
+                    candidate = current;
+                }
+
+                current = current.parentElement;
+                depth++;
             }
 
-            current = current.parentElement;
-            depth++;
+            return candidate;
         }
 
-        return candidate;
-    }
-
-    function updateInterface() {
-        installStyle();
-
-        document.querySelectorAll(
-            '[data-chatgpt-ios-fixed-header="true"]'
-        ).forEach(element => {
-            element.removeAttribute(
-                'data-chatgpt-ios-fixed-header'
-            );
-        });
-
-        const menuButton = findMenuButton();
-
-        if (!menuButton) {
-            return;
-        }
-
-        const header = findHeader(menuButton);
-
-        if (header) {
-            header.setAttribute(
-                'data-chatgpt-ios-fixed-header',
-                'true'
-            );
-        }
-
-        menuButton.style.setProperty(
-            'pointer-events',
-            'auto',
-            'important'
-        );
-    }
-
-    let scheduled = false;
-
-    function scheduleUpdate() {
-        if (scheduled) {
-            return;
-        }
-
-        scheduled = true;
-
-        requestAnimationFrame(() => {
+        function updateInterface() {
             scheduled = false;
-            updateInterface();
-        });
-    }
+            installStyle();
 
-    function startObserver() {
-        if (!document.documentElement) {
-            setTimeout(startObserver, 100);
-            return;
+            const menuButton = findMenuButton();
+            const header = findHeader(menuButton);
+
+            if (header === lastHeader) {
+                return;
+            }
+
+            if (lastHeader && lastHeader.isConnected) {
+                lastHeader.removeAttribute(
+                    'data-chatgpt-ios-fixed-header'
+                );
+            }
+
+            lastHeader = header;
+
+            if (header) {
+                header.setAttribute(
+                    'data-chatgpt-ios-fixed-header',
+                    'true'
+                );
+            }
         }
 
-        updateInterface();
+        function scheduleUpdate() {
+            if (scheduled) {
+                return;
+            }
 
-        const observer = new MutationObserver(() => {
-            scheduleUpdate();
-        });
+            scheduled = true;
 
-        observer.observe(document.documentElement, {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: [
-                'aria-label',
-                'data-testid',
-                'class',
-                'style',
-                'hidden'
-            ]
-        });
+            window.setTimeout(updateInterface, 250);
+        }
 
-        window.addEventListener(
-            'resize',
-            scheduleUpdate,
-            { passive: true }
-        );
+        function start() {
+            installStyle();
+            updateInterface();
 
-        window.addEventListener(
-            'orientationchange',
-            () => setTimeout(scheduleUpdate, 200),
-            { passive: true }
-        );
-    }
+            if (observer) {
+                observer.disconnect();
+            }
 
-    if (document.readyState === 'loading') {
-        document.addEventListener(
-            'DOMContentLoaded',
-            startObserver,
-            { once: true }
-        );
-    } else {
-        startObserver();
-    }
-})();
-"""
+            // Chỉ quan sát việc thêm hoặc xóa node.
+            // Không theo dõi class/style để tránh vòng lặp
+            // và giảm chi phí xử lý DOM.
+            observer = new MutationObserver(scheduleUpdate);
 
-// MARK: - Coordinator
+            observer.observe(document.body || document.documentElement, {
+                childList: true,
+                subtree: true
+            });
 
-final class Coordinator: NSObject,
-                        WKNavigationDelegate,
-                        WKUIDelegate,
-                        WKDownloadDelegate {
+            window.addEventListener(
+                'resize',
+                scheduleUpdate,
+                { passive: true }
+            );
+
+            window.addEventListener(
+                'pageshow',
+                scheduleUpdate,
+                { passive: true }
+            );
+        }
+
+        if (document.readyState === 'loading') {
+            document.addEventListener(
+                'DOMContentLoaded',
+                start,
+                { once: true }
+            );
+        } else {
+            start();
+        }
+    })();
+    """
+}
+
+// MARK: - WebView Coordinator
+
+private final class Coordinator: NSObject,
+                                WKNavigationDelegate,
+                                WKUIDelegate,
+                                WKDownloadDelegate {
 
     weak var webView: WKWebView?
+
+    private let onLoadingChange: (Bool) -> Void
+    private let onError: (String) -> Void
+
+    private var hasShownMainFrameError = false
 
     private var downloadsDirectory: URL {
         let documents = FileManager.default.urls(
@@ -350,7 +431,13 @@ final class Coordinator: NSObject,
         )
     }
 
-    override init() {
+    init(
+        onLoadingChange: @escaping (Bool) -> Void,
+        onError: @escaping (String) -> Void
+    ) {
+        self.onLoadingChange = onLoadingChange
+        self.onError = onError
+
         super.init()
 
         try? FileManager.default.createDirectory(
@@ -359,25 +446,79 @@ final class Coordinator: NSObject,
         )
     }
 
-    // MARK: - Navigation
+    // MARK: Navigation lifecycle
+
+    func webView(
+        _ webView: WKWebView,
+        didStartProvisionalNavigation navigation: WKNavigation!
+    ) {
+        hasShownMainFrameError = false
+        onLoadingChange(true)
+        onError("")
+    }
 
     func webView(
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
-        webView.evaluateJavaScript(
-            ChatGPTWebView.interfaceScript
-        ) { _, error in
-            if let error = error {
-                print(
-                    "Lỗi giao diện ChatGPT: " +
-                    error.localizedDescription
-                )
-            }
+        onLoadingChange(false)
+        onError("")
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFail navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        handleNavigationError(error)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        didFailProvisionalNavigation navigation: WKNavigation!,
+        withError error: Error
+    ) {
+        handleNavigationError(error)
+    }
+
+    private func handleNavigationError(_ error: Error) {
+        let nsError = error as NSError
+
+        // Bỏ qua các lỗi do người dùng chủ động dừng tải.
+        if nsError.code == NSURLErrorCancelled {
+            onLoadingChange(false)
+            return
+        }
+
+        onLoadingChange(false)
+
+        if !hasShownMainFrameError {
+            hasShownMainFrameError = true
+
+            onError(
+                "Không thể kết nối hoặc tải trang. " +
+                "Hãy kiểm tra kết nối Internet rồi thử lại. " +
+                "(\(nsError.localizedDescription))"
+            )
         }
     }
 
-    // MARK: - Detect downloads
+    // MARK: Recover WebKit process termination
+
+    func webViewWebContentProcessDidTerminate(
+        _ webView: WKWebView
+    ) {
+        // WebKit có thể kết thúc tiến trình khi thiếu bộ nhớ.
+        // Không tự tải lại liên tục vì có thể gây vòng lặp.
+        onLoadingChange(false)
+
+        onError(
+            "Tiến trình hiển thị trang đã bị dừng. " +
+            "Nhấn Thử lại để tải lại ChatGPT."
+        )
+    }
+
+    // MARK: Download detection
 
     func webView(
         _ webView: WKWebView,
@@ -419,7 +560,7 @@ final class Coordinator: NSObject,
         }
     }
 
-    // MARK: - Save downloads
+    // MARK: Save downloaded files
 
     func download(
         _ download: WKDownload,
@@ -433,12 +574,10 @@ final class Coordinator: NSObject,
                 withIntermediateDirectories: true
             )
 
-            let filename = Self.safeFilename(
-                suggestedFilename
-            )
+            let filename = Self.safeFilename(suggestedFilename)
 
-            var destination =
-                downloadsDirectory.appendingPathComponent(filename)
+            var destination = downloadsDirectory
+                .appendingPathComponent(filename)
 
             if FileManager.default.fileExists(
                 atPath: destination.path
@@ -461,14 +600,11 @@ final class Coordinator: NSObject,
                     newName = "\(base)-\(suffix).\(ext)"
                 }
 
-                destination =
-                    downloadsDirectory.appendingPathComponent(
-                        newName
-                    )
+                destination = downloadsDirectory
+                    .appendingPathComponent(newName)
             }
 
             completionHandler(destination)
-
         } catch {
             print(
                 "Không thể tạo thư mục tải xuống: \(error)"
@@ -490,22 +626,20 @@ final class Coordinator: NSObject,
         resumeData: Data?
     ) {
         print(
-            "Tải xuống thất bại: " +
-            error.localizedDescription
+            "Tải xuống thất bại: \(error.localizedDescription)"
         )
     }
 
-    private static func safeFilename(
-        _ filename: String
-    ) -> String {
+    private static func safeFilename(_ filename: String) -> String {
         let cleaned = filename
             .replacingOccurrences(of: "/", with: "_")
             .replacingOccurrences(of: "\\", with: "_")
-            .trimmingCharacters(
-                in: .whitespacesAndNewlines
-            )
+            .trimmingCharacters(in: .whitespacesAndNewlines)
 
-        return cleaned.isEmpty ? "download" : cleaned
+        if cleaned.isEmpty || cleaned == "." || cleaned == ".." {
+            return "download"
+        }
+
+        return cleaned
     }
-}
 }
