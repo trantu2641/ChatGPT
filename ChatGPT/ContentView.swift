@@ -21,13 +21,13 @@ private struct ChatGPTWebView: UIViewRepresentable {
     func makeUIView(context: Context) -> WKWebView {
         let contentController = WKUserContentController()
 
-        let script = WKUserScript(
-            source: Self.hideScrollbarsScript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
+        contentController.addUserScript(
+            WKUserScript(
+                source: Self.hideScrollbarsScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
         )
-
-        contentController.addUserScript(script)
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = contentController
@@ -40,14 +40,11 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
         view.navigationDelegate = context.coordinator
         view.uiDelegate = context.coordinator
-
         view.allowsBackForwardNavigationGestures = true
 
-        // Ẩn thanh cuộn nhưng vẫn cho phép cuộn bằng cảm ứng.
+        // Ẩn thanh cuộn nhưng vẫn cuộn bằng cảm ứng.
         view.scrollView.showsVerticalScrollIndicator = false
         view.scrollView.showsHorizontalScrollIndicator = false
-
-        // Cho phép bàn phím hoạt động bình thường trong trang ChatGPT.
         view.scrollView.keyboardDismissMode = .interactive
 
         view.isOpaque = false
@@ -77,7 +74,8 @@ private struct ChatGPTWebView: UIViewRepresentable {
         uiView.scrollView.showsHorizontalScrollIndicator = false
     }
 
-    private static let hideScrollbarsScript = """
+    // Không để private vì Coordinator cần truy cập.
+    static let hideScrollbarsScript = """
     (() => {
         const styleID = 'chatgpt-ios-hide-scrollbars';
 
@@ -147,19 +145,19 @@ private struct ChatGPTWebView: UIViewRepresentable {
             )
         }
 
-        // MARK: - Web navigation
+        // MARK: - Navigation
 
         func webView(
             _ webView: WKWebView,
             didFinish navigation: WKNavigation!
         ) {
             webView.evaluateJavaScript(
-                Self.hideScrollbarsScript,
+                ChatGPTWebView.hideScrollbarsScript,
                 completionHandler: nil
             )
         }
 
-        // MARK: - Download detection
+        // MARK: - Detect downloads
 
         func webView(
             _ webView: WKWebView,
@@ -222,7 +220,7 @@ private struct ChatGPTWebView: UIViewRepresentable {
                 var destination =
                     downloadsDirectory.appendingPathComponent(filename)
 
-                // Không ghi đè tệp cũ nếu tên bị trùng.
+                // Tránh ghi đè tệp đã tồn tại.
                 if FileManager.default.fileExists(
                     atPath: destination.path
                 ) {
@@ -231,10 +229,9 @@ private struct ChatGPTWebView: UIViewRepresentable {
                         .lastPathComponent
 
                     let ext = destination.pathExtension
-
-                    let suffix = UUID()
-                        .uuidString
-                        .prefix(8)
+                    let suffix = String(
+                        UUID().uuidString.prefix(8)
+                    )
 
                     let newName: String
 
@@ -261,7 +258,7 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
         func downloadDidFinish(_ download: WKDownload) {
             print(
-                "Tải tệp thành công vào: \(downloadsDirectory.path)"
+                "Tải xuống thành công: \(downloadsDirectory.path)"
             )
         }
 
@@ -287,3 +284,4 @@ private struct ChatGPTWebView: UIViewRepresentable {
         }
     }
 }
+
