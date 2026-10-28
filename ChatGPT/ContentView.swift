@@ -1,287 +1,511 @@
-import SwiftUI
-import WebKit
+import SwiftUI import WebKit
 
-struct ContentView: View {
-    @State private var webView: WKWebView?
+struct ContentView: View { @State private var webView: WKWebView?
 
-    var body: some View {
-        ChatGPTWebView(webView: $webView)
-            .background(Color(red: 0.07, green: 0.07, blue: 0.07))
-            .ignoresSafeArea(.container, edges: [.top, .bottom])
-    }
+
+var body: some View {
+    ChatGPTWebView(webView: $webView)
+        .background(Color(red: 0.07, green: 0.07, blue: 0.07))
+        .ignoresSafeArea(.container, edges: [.top, .bottom])
+}
 }
 
-private struct ChatGPTWebView: UIViewRepresentable {
-    @Binding var webView: WKWebView?
+private struct ChatGPTWebView: UIViewRepresentable { @Binding var webView: WKWebView?
 
-    func makeCoordinator() -> Coordinator {
-        Coordinator()
+
+func makeCoordinator() -> Coordinator {
+    Coordinator()
+}
+
+func makeUIView(context: Context) -> WKWebView {
+    let contentController = WKUserContentController()
+
+    contentController.addUserScript(
+        WKUserScript(
+            source: Self.interfaceScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false
+        )
+    )
+
+    let configuration = WKWebViewConfiguration()
+    configuration.userContentController = contentController
+    configuration.allowsInlineMediaPlayback = true
+
+    let view = WKWebView(
+        frame: .zero,
+        configuration: configuration
+    )
+
+    view.navigationDelegate = context.coordinator
+    view.uiDelegate = context.coordinator
+    view.allowsBackForwardNavigationGestures = true
+
+    view.scrollView.showsVerticalScrollIndicator = false
+    view.scrollView.showsHorizontalScrollIndicator = false
+    view.scrollView.keyboardDismissMode = .interactive
+
+    view.isOpaque = false
+    view.backgroundColor = UIColor(
+        red: 0.07,
+        green: 0.07,
+        blue: 0.07,
+        alpha: 1
+    )
+    view.scrollView.backgroundColor = view.backgroundColor
+
+    context.coordinator.webView = view
+    webView = view
+
+    if let url = URL(string: "https://chatgpt.com/") {
+        view.load(URLRequest(url: url))
     }
 
-    func makeUIView(context: Context) -> WKWebView {
-        let contentController = WKUserContentController()
+    return view
+}
 
-        contentController.addUserScript(
-            WKUserScript(
-                source: Self.hideScrollbarsScript,
-                injectionTime: .atDocumentEnd,
-                forMainFrameOnly: false
-            )
-        )
+func updateUIView(
+    _ uiView: WKWebView,
+    context: Context
+) {
+    uiView.scrollView.showsVerticalScrollIndicator = false
+    uiView.scrollView.showsHorizontalScrollIndicator = false
+}
 
-        let configuration = WKWebViewConfiguration()
-        configuration.userContentController = contentController
-        configuration.allowsInlineMediaPlayback = true
+// MARK: - JavaScript
 
-        let view = WKWebView(
-            frame: .zero,
-            configuration: configuration
-        )
+static let interfaceScript = """
+(() => {
+    if (window.__chatGPTInterfaceFixInstalled) {
+        return;
+    }
 
-        view.navigationDelegate = context.coordinator
-        view.uiDelegate = context.coordinator
-        view.allowsBackForwardNavigationGestures = true
+    window.__chatGPTInterfaceFixInstalled = true;
 
-        // Ẩn thanh cuộn nhưng vẫn cuộn bằng cảm ứng.
-        view.scrollView.showsVerticalScrollIndicator = false
-        view.scrollView.showsHorizontalScrollIndicator = false
-        view.scrollView.keyboardDismissMode = .interactive
+    const STYLE_ID = 'chatgpt-ios-interface-fixes';
 
-        view.isOpaque = false
-        view.backgroundColor = UIColor(
-            red: 0.07,
-            green: 0.07,
-            blue: 0.07,
-            alpha: 1
-        )
-        view.scrollView.backgroundColor = view.backgroundColor
-
-        context.coordinator.webView = view
-        webView = view
-
-        if let url = URL(string: "https://chatgpt.com/") {
-            view.load(URLRequest(url: url))
+    const CSS = `
+        html,
+        body,
+        * {
+            scrollbar-width: none !important;
+            -ms-overflow-style: none !important;
         }
 
-        return view
-    }
+        ::-webkit-scrollbar {
+            display: none !important;
+            width: 0 !important;
+            height: 0 !important;
+        }
 
-    func updateUIView(
-        _ uiView: WKWebView,
-        context: Context
-    ) {
-        uiView.scrollView.showsVerticalScrollIndicator = false
-        uiView.scrollView.showsHorizontalScrollIndicator = false
-    }
+        button,
+        [role="button"] {
+            -webkit-tap-highlight-color: transparent;
+        }
 
-    // Không để private vì Coordinator cần truy cập.
-    static let hideScrollbarsScript = """
-    (() => {
-        const styleID = 'chatgpt-ios-hide-scrollbars';
+        [data-chatgpt-ios-fixed-header="true"] {
+            position: sticky !important;
+            top: 0 !important;
+            z-index: 9999 !important;
+            flex-shrink: 0 !important;
+            pointer-events: auto !important;
+            isolation: isolate !important;
+        }
 
-        function applyStyle() {
-            if (document.getElementById(styleID)) {
-                return;
-            }
+        [data-chatgpt-ios-fixed-header="true"] button,
+        [data-chatgpt-ios-fixed-header="true"] [role="button"] {
+            pointer-events: auto !important;
+            touch-action: manipulation !important;
+        }
+    `;
 
-            const style = document.createElement('style');
-            style.id = styleID;
+    function installStyle() {
+        if (!document.documentElement) {
+            return;
+        }
 
-            style.textContent = `
-                html, body, * {
-                    scrollbar-width: none !important;
-                    -ms-overflow-style: none !important;
-                }
+        let style = document.getElementById(STYLE_ID);
 
-                ::-webkit-scrollbar {
-                    display: none !important;
-                    width: 0 !important;
-                    height: 0 !important;
-                }
-            `;
+        if (!style) {
+            style = document.createElement('style');
+            style.id = STYLE_ID;
 
             (document.head || document.documentElement)
                 .appendChild(style);
         }
 
-        applyStyle();
+        if (style.textContent !== CSS) {
+            style.textContent = CSS;
+        }
+    }
 
-        const observer = new MutationObserver(applyStyle);
+    function isVisible(element) {
+        if (!(element instanceof HTMLElement)) {
+            return false;
+        }
+
+        const rect = element.getBoundingClientRect();
+        const css = window.getComputedStyle(element);
+
+        return rect.width > 0 &&
+               rect.height > 0 &&
+               css.display !== 'none' &&
+               css.visibility !== 'hidden';
+    }
+
+    function findMenuButton() {
+        const selectors = [
+            'button[data-testid="open-sidebar-button"]',
+            'button[data-testid*="sidebar"]',
+            'button[aria-label*="sidebar" i]',
+            'button[aria-label*="side bar" i]',
+            'button[aria-label*="menu" i]',
+            'button[aria-label*="lịch sử" i]',
+            'button[aria-label*="thanh bên" i]',
+            '[role="button"][aria-label*="sidebar" i]',
+            '[role="button"][aria-label*="menu" i]'
+        ];
+
+        for (const selector of selectors) {
+            let elements;
+
+            try {
+                elements = document.querySelectorAll(selector);
+            } catch (_) {
+                continue;
+            }
+
+            for (const element of elements) {
+                if (isVisible(element)) {
+                    return element;
+                }
+            }
+        }
+
+        return null;
+    }
+
+    function findHeader(button) {
+        if (!button) {
+            return null;
+        }
+
+        const viewportWidth =
+            document.documentElement.clientWidth ||
+            window.innerWidth;
+
+        let current = button.parentElement;
+        let candidate = null;
+        let depth = 0;
+
+        while (
+            current &&
+            current !== document.body &&
+            depth < 8
+        ) {
+            const rect = current.getBoundingClientRect();
+
+            if (
+                rect.width >= viewportWidth * 0.70 &&
+                rect.height >= 36 &&
+                rect.height <= 120 &&
+                rect.top >= -10 &&
+                rect.top < 150
+            ) {
+                candidate = current;
+            }
+
+            if (
+                candidate &&
+                rect.width >= viewportWidth * 0.85 &&
+                rect.height >= 40 &&
+                rect.height <= 100
+            ) {
+                break;
+            }
+
+            current = current.parentElement;
+            depth++;
+        }
+
+        return candidate;
+    }
+
+    function updateInterface() {
+        installStyle();
+
+        document.querySelectorAll(
+            '[data-chatgpt-ios-fixed-header="true"]'
+        ).forEach(element => {
+            element.removeAttribute(
+                'data-chatgpt-ios-fixed-header'
+            );
+        });
+
+        const menuButton = findMenuButton();
+
+        if (!menuButton) {
+            return;
+        }
+
+        const header = findHeader(menuButton);
+
+        if (header) {
+            header.setAttribute(
+                'data-chatgpt-ios-fixed-header',
+                'true'
+            );
+        }
+
+        menuButton.style.setProperty(
+            'pointer-events',
+            'auto',
+            'important'
+        );
+    }
+
+    let scheduled = false;
+
+    function scheduleUpdate() {
+        if (scheduled) {
+            return;
+        }
+
+        scheduled = true;
+
+        requestAnimationFrame(() => {
+            scheduled = false;
+            updateInterface();
+        });
+    }
+
+    function startObserver() {
+        if (!document.documentElement) {
+            setTimeout(startObserver, 100);
+            return;
+        }
+
+        updateInterface();
+
+        const observer = new MutationObserver(() => {
+            scheduleUpdate();
+        });
 
         observer.observe(document.documentElement, {
             childList: true,
-            subtree: true
+            subtree: true,
+            attributes: true,
+            attributeFilter: [
+                'aria-label',
+                'data-testid',
+                'class',
+                'style',
+                'hidden'
+            ]
         });
 
-        setTimeout(() => observer.disconnect(), 10000);
-    })();
-    """
+        window.addEventListener(
+            'resize',
+            scheduleUpdate,
+            { passive: true }
+        );
 
-    final class Coordinator: NSObject,
-                            WKNavigationDelegate,
-                            WKUIDelegate,
-                            WKDownloadDelegate {
+        window.addEventListener(
+            'orientationchange',
+            () => setTimeout(scheduleUpdate, 200),
+            { passive: true }
+        );
+    }
 
-        weak var webView: WKWebView?
+    if (document.readyState === 'loading') {
+        document.addEventListener(
+            'DOMContentLoaded',
+            startObserver,
+            { once: true }
+        );
+    } else {
+        startObserver();
+    }
+})();
+"""
 
-        private var downloadsDirectory: URL {
-            let documents = FileManager.default.urls(
-                for: .documentDirectory,
-                in: .userDomainMask
-            )[0]
+// MARK: - Coordinator
 
-            return documents.appendingPathComponent(
-                "Downloads",
-                isDirectory: true
-            )
+final class Coordinator: NSObject,
+                        WKNavigationDelegate,
+                        WKUIDelegate,
+                        WKDownloadDelegate {
+
+    weak var webView: WKWebView?
+
+    private var downloadsDirectory: URL {
+        let documents = FileManager.default.urls(
+            for: .documentDirectory,
+            in: .userDomainMask
+        )[0]
+
+        return documents.appendingPathComponent(
+            "Downloads",
+            isDirectory: true
+        )
+    }
+
+    override init() {
+        super.init()
+
+        try? FileManager.default.createDirectory(
+            at: downloadsDirectory,
+            withIntermediateDirectories: true
+        )
+    }
+
+    // MARK: - Navigation
+
+    func webView(
+        _ webView: WKWebView,
+        didFinish navigation: WKNavigation!
+    ) {
+        webView.evaluateJavaScript(
+            ChatGPTWebView.interfaceScript
+        ) { _, error in
+            if let error = error {
+                print(
+                    "Lỗi giao diện ChatGPT: " +
+                    error.localizedDescription
+                )
+            }
         }
+    }
 
-        override init() {
-            super.init()
+    // MARK: - Detect downloads
 
-            try? FileManager.default.createDirectory(
+    func webView(
+        _ webView: WKWebView,
+        navigationAction: WKNavigationAction,
+        didBecome download: WKDownload
+    ) {
+        download.delegate = self
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        navigationResponse: WKNavigationResponse,
+        didBecome download: WKDownload
+    ) {
+        download.delegate = self
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationAction: WKNavigationAction,
+        decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
+    ) {
+        if navigationAction.shouldPerformDownload {
+            decisionHandler(.download)
+        } else {
+            decisionHandler(.allow)
+        }
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        decidePolicyFor navigationResponse: WKNavigationResponse,
+        decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
+    ) {
+        if navigationResponse.canShowMIMEType {
+            decisionHandler(.allow)
+        } else {
+            decisionHandler(.download)
+        }
+    }
+
+    // MARK: - Save downloads
+
+    func download(
+        _ download: WKDownload,
+        decideDestinationUsing response: URLResponse,
+        suggestedFilename: String,
+        completionHandler: @escaping (URL?) -> Void
+    ) {
+        do {
+            try FileManager.default.createDirectory(
                 at: downloadsDirectory,
                 withIntermediateDirectories: true
             )
-        }
 
-        // MARK: - Navigation
-
-        func webView(
-            _ webView: WKWebView,
-            didFinish navigation: WKNavigation!
-        ) {
-            webView.evaluateJavaScript(
-                ChatGPTWebView.hideScrollbarsScript,
-                completionHandler: nil
+            let filename = Self.safeFilename(
+                suggestedFilename
             )
-        }
 
-        // MARK: - Detect downloads
+            var destination =
+                downloadsDirectory.appendingPathComponent(filename)
 
-        func webView(
-            _ webView: WKWebView,
-            navigationAction: WKNavigationAction,
-            didBecome download: WKDownload
-        ) {
-            download.delegate = self
-        }
+            if FileManager.default.fileExists(
+                atPath: destination.path
+            ) {
+                let base = destination
+                    .deletingPathExtension()
+                    .lastPathComponent
 
-        func webView(
-            _ webView: WKWebView,
-            navigationResponse: WKNavigationResponse,
-            didBecome download: WKDownload
-        ) {
-            download.delegate = self
-        }
+                let ext = destination.pathExtension
 
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationAction: WKNavigationAction,
-            decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
-        ) {
-            if navigationAction.shouldPerformDownload {
-                decisionHandler(.download)
-            } else {
-                decisionHandler(.allow)
-            }
-        }
-
-        func webView(
-            _ webView: WKWebView,
-            decidePolicyFor navigationResponse: WKNavigationResponse,
-            decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
-        ) {
-            if navigationResponse.canShowMIMEType {
-                decisionHandler(.allow)
-            } else {
-                decisionHandler(.download)
-            }
-        }
-
-        // MARK: - Save downloaded files
-
-        func download(
-            _ download: WKDownload,
-            decideDestinationUsing response: URLResponse,
-            suggestedFilename: String,
-            completionHandler: @escaping (URL?) -> Void
-        ) {
-            do {
-                try FileManager.default.createDirectory(
-                    at: downloadsDirectory,
-                    withIntermediateDirectories: true
+                let suffix = String(
+                    UUID().uuidString.prefix(8)
                 )
 
-                let filename = Self.safeFilename(
-                    suggestedFilename
-                )
+                let newName: String
 
-                var destination =
-                    downloadsDirectory.appendingPathComponent(filename)
-
-                // Tránh ghi đè tệp đã tồn tại.
-                if FileManager.default.fileExists(
-                    atPath: destination.path
-                ) {
-                    let base = destination
-                        .deletingPathExtension()
-                        .lastPathComponent
-
-                    let ext = destination.pathExtension
-                    let suffix = String(
-                        UUID().uuidString.prefix(8)
-                    )
-
-                    let newName: String
-
-                    if ext.isEmpty {
-                        newName = "\(base)-\(suffix)"
-                    } else {
-                        newName = "\(base)-\(suffix).\(ext)"
-                    }
-
-                    destination =
-                        downloadsDirectory.appendingPathComponent(newName)
+                if ext.isEmpty {
+                    newName = "\(base)-\(suffix)"
+                } else {
+                    newName = "\(base)-\(suffix).\(ext)"
                 }
 
-                completionHandler(destination)
-
-            } catch {
-                print(
-                    "Không thể tạo thư mục tải xuống: \(error)"
-                )
-
-                completionHandler(nil)
+                destination =
+                    downloadsDirectory.appendingPathComponent(
+                        newName
+                    )
             }
-        }
 
-        func downloadDidFinish(_ download: WKDownload) {
+            completionHandler(destination)
+
+        } catch {
             print(
-                "Tải xuống thành công: \(downloadsDirectory.path)"
+                "Không thể tạo thư mục tải xuống: \(error)"
             )
-        }
 
-        func download(
-            _ download: WKDownload,
-            didFailWithError error: Error,
-            resumeData: Data?
-        ) {
-            print(
-                "Tải xuống thất bại: \(error.localizedDescription)"
-            )
-        }
-
-        private static func safeFilename(
-            _ filename: String
-        ) -> String {
-            let cleaned = filename
-                .replacingOccurrences(of: "/", with: "_")
-                .replacingOccurrences(of: "\\", with: "_")
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-
-            return cleaned.isEmpty ? "download" : cleaned
+            completionHandler(nil)
         }
     }
-}
 
+    func downloadDidFinish(_ download: WKDownload) {
+        print(
+            "Tải xuống thành công: \(downloadsDirectory.path)"
+        )
+    }
+
+    func download(
+        _ download: WKDownload,
+        didFailWithError error: Error,
+        resumeData: Data?
+    ) {
+        print(
+            "Tải xuống thất bại: " +
+            error.localizedDescription
+        )
+    }
+
+    private static func safeFilename(
+        _ filename: String
+    ) -> String {
+        let cleaned = filename
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "\\", with: "_")
+            .trimmingCharacters(
+                in: .whitespacesAndNewlines
+            )
+
+        return cleaned.isEmpty ? "download" : cleaned
+    }
+}
+}
