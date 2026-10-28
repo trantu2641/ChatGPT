@@ -1,0 +1,32 @@
+name: ChatGPT
+
+options:
+  bundleIdPrefix: com.trantu2641
+  deploymentTarget:
+    iOS: "16.0"
+
+settings:
+  base:
+    SWIFT_VERSION: "5.0"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    TARGETED_DEVICE_FAMILY: "1,2"
+    CODE_SIGN_STYLE: Automatic
+
+targets:
+  ChatGPT:
+    type: application
+    platform: iOS
+
+    sources:
+      - path: ChatGPT
+
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.trantu2641.chatgpt
+        PRODUCT_NAME: ChatGPT
+        INFOPLIST_FILE: ChatGPT/Info.plist
+        GENERATE_INFOPLIST_FILE: NO
+        SWIFT_VERSION: "5.0"
+        IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+        TARGETED_DEVICE_FAMILY: "1,2"
+        CODE_SIGN_STYLE: Automatic
