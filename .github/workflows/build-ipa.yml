@@ -1,0 +1,72 @@
+name: Build ChatGPT IPA
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - "ChatGPT/**"
+      - "project.yml"
+      - ".github/workflows/build-ipa.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build iOS App
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Check Xcode
+        run: xcodebuild -version
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build ChatGPT
+        run: |
+          xcodebuild \
+            -project ChatGPT.xcodeproj \
+            -scheme ChatGPT \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO \
+            build
+
+      - name: Package IPA
+        run: |
+          set -e
+
+          APP_PATH="build/Build/Products/Release-iphoneos/ChatGPT.app"
+
+          if [ ! -d "$APP_PATH" ]; then
+            echo "Không tìm thấy ChatGPT.app"
+            exit 1
+          fi
+
+          mkdir -p ipa/Payload
+          cp -R "$APP_PATH" ipa/Payload/ChatGPT.app
+
+          cd ipa
+          zip -qry ../ChatGPT-unsigned.ipa Payload
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
+        with:
+          name: ChatGPT-IPA
+          path: ChatGPT-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 14
