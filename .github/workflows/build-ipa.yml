@@ -17,12 +17,12 @@ permissions:
 
 jobs:
   build:
-    name: Build iOS App
+    name: Build ChatGPT
     runs-on: macos-15
     timeout-minutes: 30
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
 
       - name: Install XcodeGen
@@ -34,7 +34,7 @@ jobs:
       - name: Generate Xcode project
         run: xcodegen generate
 
-      - name: Build ChatGPT
+      - name: Build application
         run: |
           xcodebuild \
             -project ChatGPT.xcodeproj \
@@ -58,12 +58,13 @@ jobs:
           fi
 
           mkdir -p ipa/Payload
+
           cp -R "$APP_PATH" ipa/Payload/ChatGPT.app
 
           cd ipa
           zip -qry ../ChatGPT-unsigned.ipa Payload
 
-      - name: Upload IPA
+      - name: Upload IPA artifact
         uses: actions/upload-artifact@v4
         with:
           name: ChatGPT-IPA
