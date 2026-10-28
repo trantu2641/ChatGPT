@@ -72,7 +72,7 @@ func updateUIView(
     uiView.scrollView.showsHorizontalScrollIndicator = false
 }
 
-// MARK: - JavaScript
+// MARK: - ChatGPT interface
 
 static let interfaceScript = """
 (() => {
@@ -145,7 +145,7 @@ static let interfaceScript = """
         }
 
         const rect = element.getBoundingClientRect();
-        const css = window.getComputedStyle(element);
+        const css = getComputedStyle(element);
 
         return rect.width > 0 &&
                rect.height > 0 &&
