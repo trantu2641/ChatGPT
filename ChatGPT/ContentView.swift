@@ -3,10 +3,8 @@ import SwiftUI
 import WebKit
 import UIKit
 import Photos
-import PhotosUI
-import UniformTypeIdentifiers
 
-// MARK: - Main view
+// MARK: - Main View
 
 struct ContentView: View {
     @StateObject private var store = WebViewStore()
@@ -38,7 +36,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - WebView storage
+// MARK: - WebView Storage
 
 final class WebViewStore: ObservableObject {
     var webView: WKWebView?
@@ -63,7 +61,7 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
 
-        // Reuse the existing WebView instead of loading ChatGPT again.
+        // Reuse WebView to avoid reloading ChatGPT.
         if let existingWebView = store.webView {
             existingWebView.navigationDelegate = context.coordinator
             existingWebView.uiDelegate = context.coordinator
@@ -73,6 +71,8 @@ struct WebView: UIViewRepresentable {
 
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
+
+        // MARK: Image context menu
 
         let imageScript = """
         (function() {
@@ -149,14 +149,17 @@ struct WebView: UIViewRepresentable {
 
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.alwaysBounceVertical = true
+
+        // Improve touch responsiveness.
         webView.scrollView.delaysContentTouches = false
         webView.scrollView.panGestureRecognizer.delaysTouchesBegan = false
         webView.scrollView.canCancelContentTouches = true
+        webView.scrollView.isDirectionalLockEnabled = false
         webView.scrollView.keyboardDismissMode = .none
 
         webView.allowsBackForwardNavigationGestures = true
 
-        // Load only when the WebView is first created.
+        // Load ChatGPT only once.
         let request = URLRequest(
             url: URL(string: "https://chatgpt.com/")!,
             cachePolicy: .useProtocolCachePolicy,
@@ -169,15 +172,14 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Intentionally do not reload the page here.
+        // Do not reload the page during SwiftUI updates.
     }
 
     static func dismantleUIView(
         _ uiView: WKWebView,
         coordinator: Coordinator
     ) {
-        // Keep the WebView and its coordinator alive in WebViewStore.
-        // Do not clear delegates or website data when SwiftUI updates.
+        // Keep WebView and coordinator alive.
     }
 
     // MARK: - Coordinator
@@ -186,22 +188,14 @@ struct WebView: UIViewRepresentable {
                              WKNavigationDelegate,
                              WKUIDelegate,
                              WKScriptMessageHandler,
-                             WKDownloadDelegate,
-                             UIImagePickerControllerDelegate,
-                             UINavigationControllerDelegate,
-                             PHPickerViewControllerDelegate,
-                             UIDocumentPickerDelegate {
+                             WKDownloadDelegate {
 
         weak var webView: WKWebView?
 
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
-
         private var isPresentingController = false
 
-        private var uploadCompletion: (([URL]?) -> Void)?
-        private var allowsMultipleSelection = false
-
-        // MARK: Image handler
+        // MARK: Image Handler
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -241,7 +235,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Image download
+        // MARK: Download Image
 
         private func downloadImageFromURL(
             _ url: URL,
@@ -297,13 +291,13 @@ struct WebView: UIViewRepresentable {
             )
         }
 
-        // MARK: Save Photos
+        // MARK: Save to Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
                 guard let self = self else { return }
 
-                guard status == .authorized else {
+                guard status == .authorized || status == .limited else {
                     self.showMessage(
                         title: "Chưa được cấp quyền",
                         message: "Hãy cấp quyền thêm ảnh trong Cài đặt iPhone."
@@ -326,7 +320,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Save Files
+        // MARK: Save to Files
 
         private func saveDataToFiles(
             _ data: Data,
@@ -355,225 +349,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Camera and file upload
-
-        func webView(
-            _ webView: WKWebView,
-            runOpenPanelWith parameters: WKOpenPanelParameters,
-            initiatedByFrame frame: WKFrameInfo,
-            completionHandler: @escaping ([URL]?) -> Void
-        ) {
-            guard !isPresentingController else {
-                completionHandler(nil)
-                return
-            }
-
-            uploadCompletion = completionHandler
-            allowsMultipleSelection = parameters.allowsMultipleSelection
-
-            presentActionSheet(
-                title: "Đính kèm",
-                message: "Chọn nguồn ảnh hoặc tệp",
-                actions: [
-                    ("Camera", {
-                        self.openCamera()
-                    }),
-                    ("Thư viện ảnh", {
-                        self.openPhotoLibrary()
-                    }),
-                    ("Tệp", {
-                        self.openDocumentPicker()
-                    })
-                ],
-                cancel: {
-                    self.finishUpload(nil)
-                }
-            )
-        }
-
-        private func openCamera() {
-            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
-                finishUpload(nil)
-
-                showMessage(
-                    title: "Camera không khả dụng",
-                    message: "Thiết bị hiện không có camera khả dụng."
-                )
-                return
-            }
-
-            guard let presenter = topViewController() else {
-                finishUpload(nil)
-                return
-            }
-
-            let picker = UIImagePickerController()
-            picker.sourceType = .camera
-            picker.mediaTypes = ["public.image"]
-            picker.allowsEditing = false
-            picker.delegate = self
-
-            presenter.present(picker, animated: true)
-        }
-
-        private func openPhotoLibrary() {
-            guard let presenter = topViewController() else {
-                finishUpload(nil)
-                return
-            }
-
-            var configuration = PHPickerConfiguration()
-            configuration.filter = .images
-            configuration.selectionLimit = allowsMultipleSelection ? 0 : 1
-
-            let picker = PHPickerViewController(configuration: configuration)
-            picker.delegate = self
-
-            presenter.present(picker, animated: true)
-        }
-
-        private func openDocumentPicker() {
-            guard let presenter = topViewController() else {
-                finishUpload(nil)
-                return
-            }
-
-            let picker = UIDocumentPickerViewController(
-                forOpeningContentTypes: [.item],
-                asCopy: true
-            )
-
-            picker.allowsMultipleSelection = allowsMultipleSelection
-            picker.delegate = self
-
-            presenter.present(picker, animated: true)
-        }
-
-        // MARK: Camera result
-
-        func imagePickerController(
-            _ picker: UIImagePickerController,
-            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
-        ) {
-            guard let image = info[.originalImage] as? UIImage,
-                  let data = image.jpegData(compressionQuality: 0.92) else {
-                picker.dismiss(animated: true) {
-                    self.finishUpload(nil)
-                }
-                return
-            }
-
-            let url = FileManager.default.temporaryDirectory
-                .appendingPathComponent(makeImageFilename())
-
-            do {
-                try data.write(to: url, options: .atomic)
-
-                picker.dismiss(animated: true) {
-                    self.finishUpload([url])
-                }
-            } catch {
-                picker.dismiss(animated: true) {
-                    self.finishUpload(nil)
-                    self.showMessage(
-                        title: "Không thể sử dụng ảnh",
-                        message: error.localizedDescription
-                    )
-                }
-            }
-        }
-
-        func imagePickerControllerDidCancel(
-            _ picker: UIImagePickerController
-        ) {
-            picker.dismiss(animated: true) {
-                self.finishUpload(nil)
-            }
-        }
-
-        // MARK: Photo library result
-
-        func picker(
-            _ picker: PHPickerViewController,
-            didFinishPicking results: [PHPickerResult]
-        ) {
-            guard !results.isEmpty else {
-                picker.dismiss(animated: true) {
-                    self.finishUpload(nil)
-                }
-                return
-            }
-
-            let group = DispatchGroup()
-            let lock = NSLock()
-            var urls: [URL] = []
-
-            for result in results {
-                group.enter()
-
-                let provider = result.itemProvider
-
-                guard provider.canLoadObject(ofClass: UIImage.self) else {
-                    group.leave()
-                    continue
-                }
-
-                provider.loadObject(ofClass: UIImage.self) { object, _ in
-                    defer { group.leave() }
-
-                    guard let image = object as? UIImage,
-                          let data = image.jpegData(compressionQuality: 0.92) else {
-                        return
-                    }
-
-                    let url = FileManager.default.temporaryDirectory
-                        .appendingPathComponent(self.makeImageFilename())
-
-                    do {
-                        try data.write(to: url, options: .atomic)
-
-                        lock.lock()
-                        urls.append(url)
-                        lock.unlock()
-                    } catch {
-                        // Skip unreadable image.
-                    }
-                }
-            }
-
-            group.notify(queue: .main) {
-                picker.dismiss(animated: true) {
-                    self.finishUpload(urls.isEmpty ? nil : urls)
-                }
-            }
-        }
-
-        // MARK: Document picker result
-
-        func documentPicker(
-            _ controller: UIDocumentPickerViewController,
-            didPickDocumentsAt urls: [URL]
-        ) {
-            finishUpload(urls.isEmpty ? nil : urls)
-        }
-
-        func documentPickerWasCancelled(
-            _ controller: UIDocumentPickerViewController
-        ) {
-            finishUpload(nil)
-        }
-
-        private func finishUpload(_ urls: [URL]?) {
-            let completion = uploadCompletion
-            uploadCompletion = nil
-            isPresentingController = false
-
-            DispatchQueue.main.async {
-                completion?(urls)
-            }
-        }
-
-        // MARK: Navigation policy
+        // MARK: Navigation Policy
 
         func webView(
             _ webView: WKWebView,
@@ -604,7 +380,7 @@ struct WebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        // MARK: New window
+        // MARK: New Window
 
         func webView(
             _ webView: WKWebView,
@@ -785,14 +561,12 @@ struct WebView: UIViewRepresentable {
         private func presentActionSheet(
             title: String,
             message: String,
-            actions: [(String, () -> Void)],
-            cancel: (() -> Void)? = nil
+            actions: [(String, () -> Void)]
         ) {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self,
                       !self.isPresentingController,
                       let presenter = self.topViewController() else {
-                    cancel?()
                     return
                 }
 
@@ -815,7 +589,6 @@ struct WebView: UIViewRepresentable {
                 alert.addAction(
                     UIAlertAction(title: "Hủy", style: .cancel) { [weak self] _ in
                         self?.isPresentingController = false
-                        cancel?()
                     }
                 )
 
