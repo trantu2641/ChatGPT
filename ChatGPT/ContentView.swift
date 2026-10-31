@@ -8,44 +8,27 @@ struct ContentView: View {
     var body: some View {
         GeometryReader { geometry in
             let screen = geometry.size
-            let isPortrait = screen.height >= screen.width
+            let portrait = screen.height >= screen.width
+            let ratio: CGFloat = portrait ? 9.0 / 17.5 : 17.5 / 9.0
 
-            let ratio: CGFloat = isPortrait
-                ? 9.0 / 17.5
-                : 17.5 / 9.0
-
-            let frameWidth = min(
-                screen.width,
-                screen.height * ratio
-            )
-
-            let frameHeight = min(
-                screen.height,
-                screen.width / ratio
-            )
+            let width = min(screen.width, screen.height * ratio)
+            let height = min(screen.height, screen.width / ratio)
 
             ZStack {
                 Color.black
 
                 WebView()
-                    .frame(
-                        width: frameWidth,
-                        height: frameHeight
-                    )
+                    .frame(width: width, height: height)
                     .position(
                         x: screen.width / 2,
                         y: screen.height / 2
                     )
             }
-            .frame(
-                width: screen.width,
-                height: screen.height
-            )
+            .frame(width: screen.width, height: screen.height)
             .background(Color.black)
         }
         .ignoresSafeArea()
         .preferredColorScheme(.dark)
-        .background(Color.black)
     }
 }
 
@@ -57,7 +40,7 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-        let contentController = WKUserContentController()
+        let controller = WKUserContentController()
 
         let imageScript = """
         (function() {
@@ -86,8 +69,7 @@ struct WebView: UIViewRepresentable {
                         reader.onloadend = function() {
                             window.webkit.messageHandlers.imageHandler.postMessage({
                                 data: reader.result,
-                                filename: filename,
-                                mimeType: blob.type || 'image/jpeg'
+                                filename: filename
                             });
                         };
 
@@ -103,16 +85,16 @@ struct WebView: UIViewRepresentable {
         })();
         """
 
-        let script = WKUserScript(
-            source: imageScript,
-            injectionTime: .atDocumentEnd,
-            forMainFrameOnly: false
+        controller.addUserScript(
+            WKUserScript(
+                source: imageScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
         )
 
-        contentController.addUserScript(script)
-        contentController.add(context.coordinator, name: "imageHandler")
-
-        configuration.userContentController = contentController
+        controller.add(context.coordinator, name: "imageHandler")
+        configuration.userContentController = controller
         configuration.websiteDataStore = .default()
 
         let webView = WKWebView(
@@ -149,9 +131,8 @@ struct WebView: UIViewRepresentable {
         _ uiView: WKWebView,
         coordinator: Coordinator
     ) {
-        uiView.configuration.userContentController.removeScriptMessageHandler(
-            forName: "imageHandler"
-        )
+        uiView.configuration.userContentController
+            .removeScriptMessageHandler(forName: "imageHandler")
 
         uiView.navigationDelegate = nil
         uiView.uiDelegate = nil
@@ -169,7 +150,7 @@ struct WebView: UIViewRepresentable {
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
         private var isPresentingController = false
 
-        // MARK: Image handler
+        // MARK: - Image handler
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -181,9 +162,9 @@ struct WebView: UIViewRepresentable {
             }
 
             if let dataURL = payload["data"] as? String,
-               let commaIndex = dataURL.firstIndex(of: ",") {
+               let comma = dataURL.firstIndex(of: ",") {
 
-                let encoded = String(dataURL[dataURL.index(after: commaIndex)...])
+                let encoded = String(dataURL[dataURL.index(after: comma)...])
 
                 guard let data = Data(base64Encoded: encoded),
                       !data.isEmpty else {
@@ -194,8 +175,10 @@ struct WebView: UIViewRepresentable {
                     return
                 }
 
-                let filename = payload["filename"] as? String ?? makeImageFilename()
-                showImageOptions(data: data, filename: filename)
+                showImageOptions(
+                    data: data,
+                    filename: payload["filename"] as? String ?? makeImageFilename()
+                )
 
             } else if let urlString = payload["url"] as? String,
                       let url = URL(string: urlString) {
@@ -207,13 +190,10 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Image download
+        // MARK: - Image download
 
         private func downloadImageFromURL(_ url: URL, filename: String) {
-            var request = URLRequest(url: url)
-            request.timeoutInterval = 60
-
-            URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+            URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
 
@@ -222,10 +202,9 @@ struct WebView: UIViewRepresentable {
                           (200...299).contains(response.statusCode),
                           let data = data,
                           !data.isEmpty else {
-
                         self.showMessage(
                             title: "Không thể tải ảnh",
-                            message: "Máy chủ không cho phép tải ảnh này. Hãy thử ảnh khác."
+                            message: "Máy chủ không cho phép tải ảnh này."
                         )
                         return
                     }
@@ -235,13 +214,11 @@ struct WebView: UIViewRepresentable {
             }.resume()
         }
 
-        // MARK: Image options
-
         private func showImageOptions(data: Data, filename: String) {
             guard let image = UIImage(data: data) else {
                 showMessage(
                     title: "Ảnh không hợp lệ",
-                    message: "Không thể đọc dữ liệu ảnh này."
+                    message: "Không thể đọc dữ liệu ảnh."
                 )
                 return
             }
@@ -250,73 +227,61 @@ struct WebView: UIViewRepresentable {
                 title: "Lưu hình ảnh",
                 message: "Bạn muốn lưu ảnh ở đâu?",
                 actions: [
-                    ("Lưu vào Ảnh", .default, { [weak self] in
-                        self?.saveImageToPhotos(image)
+                    ("Lưu vào Ảnh", {
+                        self.saveImageToPhotos(image)
                     }),
-                    ("Lưu vào Tệp", .default, { [weak self] in
-                        self?.saveDataToFiles(data, filename: filename)
+                    ("Lưu vào Tệp", {
+                        self.saveDataToFiles(data, filename: filename)
                     })
                 ]
             )
         }
 
-        // MARK: Save to Photos
+        // MARK: - Save Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
-
                 guard let self = self else { return }
 
                 guard status == .authorized else {
-                    DispatchQueue.main.async {
-                        self.showMessage(
-                            title: "Chưa được cấp quyền",
-                            message: "Hãy cho phép ứng dụng thêm ảnh vào thư viện trong Cài đặt iPhone."
-                        )
-                    }
+                    self.showMessage(
+                        title: "Chưa được cấp quyền",
+                        message: "Hãy cấp quyền thêm ảnh trong Cài đặt iPhone."
+                    )
                     return
                 }
 
                 PHPhotoLibrary.shared().performChanges({
                     PHAssetChangeRequest.creationRequestForAsset(from: image)
                 }) { success, error in
-
                     DispatchQueue.main.async {
-                        if success {
-                            self.showMessage(
-                                title: "Đã lưu ảnh",
-                                message: "Ảnh đã được lưu vào thư viện Ảnh."
-                            )
-                        } else {
-                            self.showMessage(
-                                title: "Không thể lưu ảnh",
-                                message: error?.localizedDescription ?? "Đã xảy ra lỗi khi lưu ảnh."
-                            )
-                        }
+                        self.showMessage(
+                            title: success ? "Đã lưu ảnh" : "Không thể lưu ảnh",
+                            message: success
+                                ? "Ảnh đã được lưu vào thư viện."
+                                : (error?.localizedDescription ?? "Đã xảy ra lỗi.")
+                        )
                     }
                 }
             }
         }
 
-        // MARK: Save to Files
+        // MARK: - Save Files
 
         private func saveDataToFiles(_ data: Data, filename: String) {
             do {
                 let directory = try downloadsDirectory()
-                let safeName = sanitizedFilename(filename)
-
                 let destination = uniqueURL(
                     in: directory,
-                    filename: safeName
+                    filename: sanitizedFilename(filename)
                 )
 
                 try data.write(to: destination, options: .atomic)
 
                 showMessage(
                     title: "Đã lưu tệp",
-                    message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads trong ứng dụng Tệp."
+                    message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
                 )
-
             } catch {
                 showMessage(
                     title: "Lỗi lưu tệp",
@@ -325,23 +290,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Navigation downloads
-
-        func webView(
-            _ webView: WKWebView,
-            navigationAction: WKNavigationAction,
-            didBecome download: WKDownload
-        ) {
-            download.delegate = self
-        }
-
-        func webView(
-            _ webView: WKWebView,
-            navigationResponse: WKNavigationResponse,
-            didBecome download: WKDownload
-        ) {
-            download.delegate = self
-        }
+        // MARK: - Navigation policy
 
         func webView(
             _ webView: WKWebView,
@@ -360,14 +309,23 @@ struct WebView: UIViewRepresentable {
             decidePolicyFor navigationResponse: WKNavigationResponse,
             decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
         ) {
-            if !navigationResponse.canShowMIMEType {
+            // Chỉ chuyển sang download nếu máy chủ xác định rõ
+            // đây là tệp đính kèm.
+            if let response = navigationResponse.response as? HTTPURLResponse,
+               let disposition = response.value(
+                    forHTTPHeaderField: "Content-Disposition"
+               ),
+               disposition.localizedCaseInsensitiveContains("attachment") {
+
                 decisionHandler(.download)
-            } else {
-                decisionHandler(.allow)
+                return
             }
+
+            // Không ép mọi MIME không hỗ trợ thành download.
+            decisionHandler(.allow)
         }
 
-        // MARK: New window
+        // MARK: - New window
 
         func webView(
             _ webView: WKWebView,
@@ -375,7 +333,6 @@ struct WebView: UIViewRepresentable {
             for navigationAction: WKNavigationAction,
             windowFeatures: WKWindowFeatures
         ) -> WKWebView? {
-
             if navigationAction.targetFrame == nil {
                 webView.load(navigationAction.request)
             }
@@ -383,7 +340,23 @@ struct WebView: UIViewRepresentable {
             return nil
         }
 
-        // MARK: Download delegate
+        // MARK: - WKDownload
+
+        func webView(
+            _ webView: WKWebView,
+            navigationAction: WKNavigationAction,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
+        }
+
+        func webView(
+            _ webView: WKWebView,
+            navigationResponse: WKNavigationResponse,
+            didBecome download: WKDownload
+        ) {
+            download.delegate = self
+        }
 
         func download(
             _ download: WKDownload,
@@ -393,15 +366,12 @@ struct WebView: UIViewRepresentable {
         ) {
             do {
                 let directory = try downloadsDirectory()
-                let safeName = sanitizedFilename(suggestedFilename)
-
                 let destination = uniqueURL(
                     in: directory,
-                    filename: safeName
+                    filename: sanitizedFilename(suggestedFilename)
                 )
 
                 downloadDestinations[ObjectIdentifier(download)] = destination
-
                 completionHandler(destination)
 
             } catch {
@@ -415,28 +385,28 @@ struct WebView: UIViewRepresentable {
         }
 
         func downloadDidFinish(_ download: WKDownload) {
-            let key = ObjectIdentifier(download)
-            let destination = downloadDestinations.removeValue(forKey: key)
+            let destination = downloadDestinations.removeValue(
+                forKey: ObjectIdentifier(download)
+            )
 
             guard let destination = destination else {
                 showMessage(
                     title: "Tải xuống hoàn tất",
-                    message: "Hãy kiểm tra thư mục Downloads trong ứng dụng Tệp."
+                    message: "Hãy kiểm tra thư mục Downloads."
                 )
                 return
             }
 
-            if FileManager.default.fileExists(atPath: destination.path) {
-                showMessage(
-                    title: "Tải xuống hoàn tất",
-                    message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads trong ứng dụng Tệp."
-                )
-            } else {
-                showMessage(
-                    title: "Không tìm thấy tệp",
-                    message: "Quá trình tải đã kết thúc nhưng không tìm thấy tệp tại vị trí lưu."
-                )
-            }
+            let exists = FileManager.default.fileExists(
+                atPath: destination.path
+            )
+
+            showMessage(
+                title: exists ? "Tải xuống hoàn tất" : "Không tìm thấy tệp",
+                message: exists
+                    ? "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
+                    : "Không tìm thấy tệp sau khi tải."
+            )
         }
 
         func download(
@@ -444,7 +414,9 @@ struct WebView: UIViewRepresentable {
             didFailWithError error: Error,
             resumeData: Data?
         ) {
-            downloadDestinations.removeValue(forKey: ObjectIdentifier(download))
+            downloadDestinations.removeValue(
+                forKey: ObjectIdentifier(download)
+            )
 
             showMessage(
                 title: "Tải xuống thất bại",
@@ -452,7 +424,7 @@ struct WebView: UIViewRepresentable {
             )
         }
 
-        // MARK: Directory
+        // MARK: - Directory
 
         private func downloadsDirectory() throws -> URL {
             let documents = FileManager.default.urls(
@@ -474,10 +446,10 @@ struct WebView: UIViewRepresentable {
         }
 
         private func sanitizedFilename(_ filename: String) -> String {
-            let invalidCharacters = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+            let invalid = CharacterSet(charactersIn: "/\\:?%*|\"<>")
 
             let cleaned = filename
-                .components(separatedBy: invalidCharacters)
+                .components(separatedBy: invalid)
                 .joined(separator: "_")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -486,7 +458,10 @@ struct WebView: UIViewRepresentable {
                 : cleaned
         }
 
-        private func uniqueURL(in directory: URL, filename: String) -> URL {
+        private func uniqueURL(
+            in directory: URL,
+            filename: String
+        ) -> URL {
             let original = URL(fileURLWithPath: filename)
             let name = original.deletingPathExtension().lastPathComponent
             let ext = original.pathExtension
@@ -510,7 +485,7 @@ struct WebView: UIViewRepresentable {
             "image_\(Int(Date().timeIntervalSince1970)).jpg"
         }
 
-        // MARK: Presentation
+        // MARK: - Alerts
 
         private func topViewController() -> UIViewController? {
             guard let root = webView?.window?.rootViewController else {
@@ -529,7 +504,7 @@ struct WebView: UIViewRepresentable {
         private func presentActionSheet(
             title: String,
             message: String,
-            actions: [(String, UIAlertAction.Style, () -> Void)]
+            actions: [(String, () -> Void)]
         ) {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self,
@@ -546,14 +521,17 @@ struct WebView: UIViewRepresentable {
 
                 for item in actions {
                     alert.addAction(
-                        UIAlertAction(title: item.0, style: item.1) { _ in
-                            item.2()
+                        UIAlertAction(title: item.0, style: .default) { _ in
+                            self.isPresentingController = false
+                            item.1()
                         }
                     )
                 }
 
                 alert.addAction(
-                    UIAlertAction(title: "Hủy", style: .cancel)
+                    UIAlertAction(title: "Hủy", style: .cancel) { _ in
+                        self.isPresentingController = false
+                    }
                 )
 
                 if let popover = alert.popoverPresentationController {
@@ -568,9 +546,10 @@ struct WebView: UIViewRepresentable {
                 }
 
                 self.isPresentingController = true
-                alert.presentationController?.delegate = self
 
-                presenter.present(alert, animated: true)
+                presenter.present(alert, animated: true) {
+                    alert.presentationController?.delegate = self
+                }
             }
         }
 
@@ -589,13 +568,16 @@ struct WebView: UIViewRepresentable {
                 )
 
                 alert.addAction(
-                    UIAlertAction(title: "Đóng", style: .default)
+                    UIAlertAction(title: "Đóng", style: .default) { _ in
+                        self.isPresentingController = false
+                    }
                 )
 
                 self.isPresentingController = true
-                alert.presentationController?.delegate = self
 
-                presenter.present(alert, animated: true)
+                presenter.present(alert, animated: true) {
+                    alert.presentationController?.delegate = self
+                }
             }
         }
     }
