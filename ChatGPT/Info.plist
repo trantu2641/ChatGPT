@@ -61,6 +61,13 @@
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Ứng dụng cần quyền để lưu hình ảnh vào thư viện Ảnh.</string>
 
+    <key>NSMicrophoneUsageDescription</key>
+    <string>ChatGPT cần sử dụng micro để hỗ trợ trò chuyện bằng giọng nói.</string>
+
+    <key>NSCameraUsageDescription</key>
+    <string>ChatGPT cần sử dụng camera để chụp ảnh và gửi nội dung.</string>
+
+
     <key>NSPhotoLibraryUsageDescription</key>
     <string>ChatGPT cần truy cập ảnh để bạn chọn hình ảnh gửi vào cuộc trò chuyện.</string>
 
