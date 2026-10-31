@@ -63,17 +63,17 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
 
-        if let existing = store.webView {
-            existing.navigationDelegate = context.coordinator
-            existing.uiDelegate = context.coordinator
-            context.coordinator.webView = existing
-            return existing
+        if let existingWebView = store.webView {
+            existingWebView.navigationDelegate = context.coordinator
+            existingWebView.uiDelegate = context.coordinator
+            context.coordinator.webView = existingWebView
+            return existingWebView
         }
 
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
 
-        // MARK: JavaScript bridge
+        // MARK: Upload JavaScript
 
         let uploadScript = """
         (function() {
@@ -83,25 +83,21 @@ struct WebView: UIViewRepresentable {
             window.__nativeUploadInput = null;
 
             document.addEventListener('click', function(event) {
-                const input = event.target.closest('input[type="file"]');
+                const target = event.target;
+
+                if (!target || !target.closest) return;
+
+                const input = target.closest('input[type="file"]');
 
                 if (!input) return;
 
                 const accept = (input.accept || '').toLowerCase();
 
-                // Only intercept image or general attachment inputs.
-                const isImage = accept.includes('image');
-                const isGeneral = accept === '' ||
-                                  accept.includes('*') ||
-                                  accept.includes('.');
-
-                if (!isImage && !isGeneral) return;
+                window.__nativeUploadInput = input;
 
                 event.preventDefault();
                 event.stopPropagation();
                 event.stopImmediatePropagation();
-
-                window.__nativeUploadInput = input;
 
                 window.webkit.messageHandlers.uploadHandler.postMessage({
                     multiple: input.multiple,
@@ -113,7 +109,12 @@ struct WebView: UIViewRepresentable {
                 const input = window.__nativeUploadInput;
 
                 if (!input || !input.isConnected) {
-                    return false;
+                    window.webkit.messageHandlers.uploadResult.postMessage({
+                        success: false,
+                        reason: 'input_missing'
+                    });
+
+                    return;
                 }
 
                 try {
@@ -130,7 +131,9 @@ struct WebView: UIViewRepresentable {
                         const file = new File(
                             [bytes],
                             item.name,
-                            { type: item.type || 'application/octet-stream' }
+                            {
+                                type: item.type || 'application/octet-stream'
+                            }
                         );
 
                         transfer.items.add(file);
@@ -148,10 +151,17 @@ struct WebView: UIViewRepresentable {
 
                     window.__nativeUploadInput = null;
 
-                    return true;
+                    window.webkit.messageHandlers.uploadResult.postMessage({
+                        success: true
+                    });
+
                 } catch (error) {
                     console.error('Native upload error:', error);
-                    return false;
+
+                    window.webkit.messageHandlers.uploadResult.postMessage({
+                        success: false,
+                        reason: String(error)
+                    });
                 }
             };
         })();
@@ -165,7 +175,8 @@ struct WebView: UIViewRepresentable {
             )
         )
 
-        // Image context menu script
+        // MARK: Image context menu
+
         let imageScript = """
         (function() {
             if (window.__nativeImageMenuInstalled) return;
@@ -173,9 +184,11 @@ struct WebView: UIViewRepresentable {
 
             document.addEventListener('contextmenu', function(event) {
                 const image = event.target.closest('img');
+
                 if (!image) return;
 
                 const src = image.currentSrc || image.src;
+
                 if (!src) return;
 
                 event.preventDefault();
@@ -184,7 +197,10 @@ struct WebView: UIViewRepresentable {
 
                 fetch(src, { credentials: 'include' })
                     .then(response => {
-                        if (!response.ok) throw new Error('Image fetch failed');
+                        if (!response.ok) {
+                            throw new Error('Image fetch failed');
+                        }
+
                         return response.blob();
                     })
                     .then(blob => {
@@ -218,6 +234,7 @@ struct WebView: UIViewRepresentable {
         )
 
         controller.add(context.coordinator, name: "uploadHandler")
+        controller.add(context.coordinator, name: "uploadResult")
         controller.add(context.coordinator, name: "imageHandler")
 
         configuration.userContentController = controller
@@ -260,14 +277,14 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Do not reload during SwiftUI updates.
+        // Do not reload the page during SwiftUI updates.
     }
 
     static func dismantleUIView(
         _ uiView: WKWebView,
         coordinator: Coordinator
     ) {
-        // Keep the existing WebView alive.
+        // Keep the WebView alive in WebViewStore.
     }
 
     // MARK: - Coordinator
@@ -290,7 +307,15 @@ struct WebView: UIViewRepresentable {
 
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
 
-        // MARK: JavaScript messages
+        // MARK: Upload File Model
+
+        private struct UploadFile {
+            let data: Data
+            let name: String
+            let type: String
+        }
+
+        // MARK: JavaScript Messages
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -300,20 +325,40 @@ struct WebView: UIViewRepresentable {
                 return
             }
 
-            if message.name == "uploadHandler" {
-                allowsMultipleSelection = payload["multiple"] as? Bool ?? false
-                currentAccept = payload["accept"] as? String ?? ""
+            switch message.name {
+
+            case "uploadHandler":
+                allowsMultipleSelection =
+                    payload["multiple"] as? Bool ?? false
+
+                currentAccept =
+                    payload["accept"] as? String ?? ""
 
                 showUploadOptions()
-                return
-            }
 
-            if message.name == "imageHandler" {
+            case "uploadResult":
+                let success = payload["success"] as? Bool ?? false
+
+                if !success {
+                    let reason = payload["reason"] as? String ?? ""
+
+                    showMessage(
+                        title: "Không thể đính kèm",
+                        message: reason == "input_missing"
+                            ? "Ô chọn tệp không còn tồn tại. Hãy mở lại nút đính kèm và thử lại."
+                            : "Không thể đưa ảnh vào ChatGPT. Hãy thử lại."
+                    )
+                }
+
+            case "imageHandler":
                 handleImageMessage(payload)
+
+            default:
+                break
             }
         }
 
-        // MARK: Upload menu
+        // MARK: Upload Menu
 
         private func showUploadOptions() {
             presentActionSheet(
@@ -339,7 +384,7 @@ struct WebView: UIViewRepresentable {
             guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
                 showMessage(
                     title: "Camera không khả dụng",
-                    message: "Thiết bị không có camera khả dụng."
+                    message: "Thiết bị hiện không có camera khả dụng."
                 )
                 return
             }
@@ -367,16 +412,14 @@ struct WebView: UIViewRepresentable {
                 return
             }
 
-            let name = makeImageFilename()
+            let file = UploadFile(
+                data: data,
+                name: makeImageFilename(),
+                type: "image/jpeg"
+            )
 
             picker.dismiss(animated: true) {
-                self.sendFilesToWebView([
-                    UploadFile(
-                        data: data,
-                        name: name,
-                        type: "image/jpeg"
-                    )
-                ])
+                self.sendFilesToWebView([file])
             }
         }
 
@@ -397,7 +440,10 @@ struct WebView: UIViewRepresentable {
             configuration.filter = .images
             configuration.selectionLimit = allowsMultipleSelection ? 0 : 1
 
-            let picker = PHPickerViewController(configuration: configuration)
+            let picker = PHPickerViewController(
+                configuration: configuration
+            )
+
             picker.delegate = self
 
             presenter.present(picker, animated: true)
@@ -423,7 +469,9 @@ struct WebView: UIViewRepresentable {
                 result.itemProvider.loadObject(ofClass: UIImage.self) {
                     object, error in
 
-                    defer { group.leave() }
+                    defer {
+                        group.leave()
+                    }
 
                     guard error == nil,
                           let image = object as? UIImage,
@@ -473,14 +521,17 @@ struct WebView: UIViewRepresentable {
             didPickDocumentsAt urls: [URL]
         ) {
             let group = DispatchGroup()
-            var files: [UploadFile] = []
             let lock = NSLock()
+
+            var files: [UploadFile] = []
 
             for url in urls {
                 group.enter()
 
                 DispatchQueue.global(qos: .userInitiated).async {
-                    defer { group.leave() }
+                    defer {
+                        group.leave()
+                    }
 
                     do {
                         let data = try Data(contentsOf: url)
@@ -494,6 +545,7 @@ struct WebView: UIViewRepresentable {
                         lock.lock()
                         files.append(file)
                         lock.unlock()
+
                     } catch {
                         // Skip files that cannot be read.
                     }
@@ -508,21 +560,15 @@ struct WebView: UIViewRepresentable {
         func documentPickerWasCancelled(
             _ controller: UIDocumentPickerViewController
         ) {
-            // Keep the current ChatGPT page unchanged.
+            // Keep current ChatGPT page unchanged.
         }
 
-        // MARK: Send file into ChatGPT
-
-        private struct UploadFile {
-            let data: Data
-            let name: String
-            let type: String
-        }
+        // MARK: Send Files to WebView
 
         private func sendFilesToWebView(_ files: [UploadFile]) {
             guard !files.isEmpty else {
                 showMessage(
-                    title: "Không có ảnh",
+                    title: "Không có tệp",
                     message: "Không thể đọc nội dung đã chọn."
                 )
                 return
@@ -532,11 +578,11 @@ struct WebView: UIViewRepresentable {
                 ? files
                 : Array(files.prefix(1))
 
-            let items: [[String: String]] = selectedFiles.map {
+            let items: [[String: String]] = selectedFiles.map { file in
                 [
-                    "data": $0.data.base64EncodedString(),
-                    "name": $0.name,
-                    "type": $0.type
+                    "data": file.data.base64EncodedString(),
+                    "name": file.name,
+                    "type": file.type
                 ]
             }
 
@@ -546,8 +592,8 @@ struct WebView: UIViewRepresentable {
             ),
             let json = String(data: jsonData, encoding: .utf8) else {
                 showMessage(
-                    title: "Lỗi ảnh",
-                    message: "Không thể chuẩn bị dữ liệu ảnh."
+                    title: "Lỗi dữ liệu",
+                    message: "Không thể chuẩn bị ảnh để gửi."
                 )
                 return
             }
@@ -555,36 +601,29 @@ struct WebView: UIViewRepresentable {
             let script = """
             (function() {
                 if (typeof window.__nativeSetFiles !== 'function') {
-                    return 'handler_missing';
+                    window.webkit.messageHandlers.uploadResult.postMessage({
+                        success: false,
+                        reason: 'handler_missing'
+                    });
+                    return true;
                 }
 
-                return window.__nativeSetFiles(\(json));
+                window.__nativeSetFiles(\(json));
+
+                return true;
             })();
             """
 
-            webView?.evaluateJavaScript(script) { result, error in
-                DispatchQueue.main.async {
-                    if let error = error {
-                        self.showMessage(
-                            title: "Không thể đính kèm",
-                            message: error.localizedDescription
-                        )
-                        return
-                    }
-
-                    if let success = result as? Bool, success {
-                        // File has been inserted into ChatGPT's file input.
-                    } else {
-                        self.showMessage(
-                            title: "Không thể đính kèm",
-                            message: "Ô chọn tệp không còn tồn tại. Hãy thử chọn ảnh lại."
-                        )
-                    }
+            webView?.evaluateJavaScript(script) { _, error in
+                if let error = error {
+                    print(
+                        "Upload JavaScript error: \(error.localizedDescription)"
+                    )
                 }
             }
         }
 
-        // MARK: MIME type
+        // MARK: MIME Type
 
         private func mimeType(for url: URL) -> String {
             if let type = UTType(filenameExtension: url.pathExtension),
@@ -601,7 +640,9 @@ struct WebView: UIViewRepresentable {
             if let dataURL = payload["data"] as? String,
                let comma = dataURL.firstIndex(of: ",") {
 
-                let encoded = String(dataURL[dataURL.index(after: comma)...])
+                let encoded = String(
+                    dataURL[dataURL.index(after: comma)...]
+                )
 
                 guard let data = Data(base64Encoded: encoded) else {
                     return
@@ -609,13 +650,16 @@ struct WebView: UIViewRepresentable {
 
                 showImageOptions(
                     data: data,
-                    filename: payload["filename"] as? String ?? makeImageFilename()
+                    filename: payload["filename"] as? String
+                        ?? makeImageFilename()
                 )
 
             } else if let urlString = payload["url"] as? String,
                       let url = URL(string: urlString) {
 
-                URLSession.shared.dataTask(with: url) { data, _, error in
+                URLSession.shared.dataTask(with: url) {
+                    data, _, error in
+
                     DispatchQueue.main.async {
                         guard error == nil, let data = data else {
                             self.showMessage(
@@ -627,7 +671,8 @@ struct WebView: UIViewRepresentable {
 
                         self.showImageOptions(
                             data: data,
-                            filename: payload["filename"] as? String ?? self.makeImageFilename()
+                            filename: payload["filename"] as? String
+                                ?? self.makeImageFilename()
                         )
                     }
                 }.resume()
@@ -659,7 +704,9 @@ struct WebView: UIViewRepresentable {
         // MARK: Save Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) {
+                status in
+
                 guard status == .authorized || status == .limited else {
                     DispatchQueue.main.async {
                         self.showMessage(
@@ -675,10 +722,13 @@ struct WebView: UIViewRepresentable {
                 }) { success, error in
                     DispatchQueue.main.async {
                         self.showMessage(
-                            title: success ? "Đã lưu ảnh" : "Không thể lưu ảnh",
+                            title: success
+                                ? "Đã lưu ảnh"
+                                : "Không thể lưu ảnh",
                             message: success
                                 ? "Ảnh đã được lưu vào thư viện."
-                                : (error?.localizedDescription ?? "Đã xảy ra lỗi.")
+                                : (error?.localizedDescription
+                                    ?? "Đã xảy ra lỗi.")
                         )
                     }
                 }
@@ -705,6 +755,7 @@ struct WebView: UIViewRepresentable {
                     title: "Đã lưu tệp",
                     message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
                 )
+
             } catch {
                 showMessage(
                     title: "Lỗi lưu tệp",
@@ -713,7 +764,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Navigation
+        // MARK: Navigation Policy
 
         func webView(
             _ webView: WKWebView,
@@ -744,6 +795,8 @@ struct WebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
+        // MARK: New Window
+
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -759,9 +812,11 @@ struct WebView: UIViewRepresentable {
 
         // MARK: Web Content Process
 
-        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        func webViewWebContentProcessDidTerminate(
+            _ webView: WKWebView
+        ) {
             // Do not automatically reload.
-            // Automatic reload could discard the user's current conversation.
+            // This avoids discarding the current page unnecessarily.
             print("ChatGPT WebContent process terminated.")
         }
 
@@ -797,7 +852,10 @@ struct WebView: UIViewRepresentable {
                     filename: sanitizedFilename(suggestedFilename)
                 )
 
-                downloadDestinations[ObjectIdentifier(download)] = destination
+                downloadDestinations[
+                    ObjectIdentifier(download)
+                ] = destination
+
                 completionHandler(destination)
 
             } catch {
@@ -862,7 +920,9 @@ struct WebView: UIViewRepresentable {
         }
 
         private func sanitizedFilename(_ filename: String) -> String {
-            let invalid = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+            let invalid = CharacterSet(
+                charactersIn: "/\\:?%*|\"<>"
+            )
 
             let cleaned = filename
                 .components(separatedBy: invalid)
@@ -885,7 +945,9 @@ struct WebView: UIViewRepresentable {
             var candidate = directory.appendingPathComponent(filename)
             var index = 1
 
-            while FileManager.default.fileExists(atPath: candidate.path) {
+            while FileManager.default.fileExists(
+                atPath: candidate.path
+            ) {
                 let newName = ext.isEmpty
                     ? "\(name)_\(index)"
                     : "\(name)_\(index).\(ext)"
@@ -936,7 +998,10 @@ struct WebView: UIViewRepresentable {
 
                 for item in actions {
                     alert.addAction(
-                        UIAlertAction(title: item.0, style: .default) { _ in
+                        UIAlertAction(
+                            title: item.0,
+                            style: .default
+                        ) { _ in
                             self.isPresentingController = false
                             item.1()
                         }
@@ -944,7 +1009,10 @@ struct WebView: UIViewRepresentable {
                 }
 
                 alert.addAction(
-                    UIAlertAction(title: "Hủy", style: .cancel) { _ in
+                    UIAlertAction(
+                        title: "Hủy",
+                        style: .cancel
+                    ) { _ in
                         self.isPresentingController = false
                     }
                 )
@@ -982,7 +1050,10 @@ struct WebView: UIViewRepresentable {
                 )
 
                 alert.addAction(
-                    UIAlertAction(title: "Đóng", style: .default) { _ in
+                    UIAlertAction(
+                        title: "Đóng",
+                        style: .default
+                    ) { _ in
                         self.isPresentingController = false
                     }
                 )
