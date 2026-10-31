@@ -6,9 +6,46 @@ import Photos
 
 struct ContentView: View {
     var body: some View {
-        WebView()
-            .ignoresSafeArea()
-            .preferredColorScheme(.dark)
+        GeometryReader { geometry in
+            let screen = geometry.size
+            let isPortrait = screen.height >= screen.width
+
+            let ratio: CGFloat = isPortrait
+                ? 9.0 / 17.5
+                : 17.5 / 9.0
+
+            let frameWidth = min(
+                screen.width,
+                screen.height * ratio
+            )
+
+            let frameHeight = min(
+                screen.height,
+                screen.width / ratio
+            )
+
+            ZStack {
+                Color.black
+
+                WebView()
+                    .frame(
+                        width: frameWidth,
+                        height: frameHeight
+                    )
+                    .position(
+                        x: screen.width / 2,
+                        y: screen.height / 2
+                    )
+            }
+            .frame(
+                width: screen.width,
+                height: screen.height
+            )
+            .background(Color.black)
+        }
+        .ignoresSafeArea()
+        .preferredColorScheme(.dark)
+        .background(Color.black)
     }
 }
 
@@ -20,7 +57,6 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
-
         let contentController = WKUserContentController()
 
         let imageScript = """
@@ -119,11 +155,8 @@ struct WebView: UIViewRepresentable {
 
         uiView.navigationDelegate = nil
         uiView.uiDelegate = nil
-
         coordinator.webView = nil
     }
-
-    // MARK: - Coordinator
 
     final class Coordinator: NSObject,
                              WKNavigationDelegate,
@@ -136,7 +169,7 @@ struct WebView: UIViewRepresentable {
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
         private var isPresentingController = false
 
-        // MARK: JavaScript image handler
+        // MARK: Image handler
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -174,7 +207,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Image download fallback
+        // MARK: Image download
 
         private func downloadImageFromURL(_ url: URL, filename: String) {
             var request = URLRequest(url: url)
@@ -270,8 +303,8 @@ struct WebView: UIViewRepresentable {
         private func saveDataToFiles(_ data: Data, filename: String) {
             do {
                 let directory = try downloadsDirectory()
-
                 let safeName = sanitizedFilename(filename)
+
                 let destination = uniqueURL(
                     in: directory,
                     filename: safeName
@@ -292,7 +325,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: WKNavigationDelegate
+        // MARK: Navigation downloads
 
         func webView(
             _ webView: WKWebView,
@@ -334,7 +367,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: New window handling
+        // MARK: New window
 
         func webView(
             _ webView: WKWebView,
@@ -350,7 +383,7 @@ struct WebView: UIViewRepresentable {
             return nil
         }
 
-        // MARK: WKDownloadDelegate
+        // MARK: Download delegate
 
         func download(
             _ download: WKDownload,
@@ -360,8 +393,8 @@ struct WebView: UIViewRepresentable {
         ) {
             do {
                 let directory = try downloadsDirectory()
-
                 let safeName = sanitizedFilename(suggestedFilename)
+
                 let destination = uniqueURL(
                     in: directory,
                     filename: safeName
@@ -393,9 +426,7 @@ struct WebView: UIViewRepresentable {
                 return
             }
 
-            let exists = FileManager.default.fileExists(atPath: destination.path)
-
-            if exists {
+            if FileManager.default.fileExists(atPath: destination.path) {
                 showMessage(
                     title: "Tải xuống hoàn tất",
                     message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads trong ứng dụng Tệp."
@@ -450,7 +481,9 @@ struct WebView: UIViewRepresentable {
                 .joined(separator: "_")
                 .trimmingCharacters(in: .whitespacesAndNewlines)
 
-            return cleaned.isEmpty ? "download_\(Int(Date().timeIntervalSince1970))" : cleaned
+            return cleaned.isEmpty
+                ? "download_\(Int(Date().timeIntervalSince1970))"
+                : cleaned
         }
 
         private func uniqueURL(in directory: URL, filename: String) -> URL {
@@ -535,8 +568,8 @@ struct WebView: UIViewRepresentable {
                 }
 
                 self.isPresentingController = true
-
                 alert.presentationController?.delegate = self
+
                 presenter.present(alert, animated: true)
             }
         }
@@ -560,15 +593,13 @@ struct WebView: UIViewRepresentable {
                 )
 
                 self.isPresentingController = true
-
                 alert.presentationController?.delegate = self
+
                 presenter.present(alert, animated: true)
             }
         }
     }
 }
-
-// MARK: Presentation controller delegate
 
 extension WebView.Coordinator: UIAdaptivePresentationControllerDelegate {
     func presentationControllerDidDismiss(
