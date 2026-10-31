@@ -51,6 +51,18 @@
     <key>UIViewControllerBasedStatusBarAppearance</key>
     <true/>
 
+    <key>NSPhotoLibraryAddUsageDescription</key>
+    <string>ChatGPT cần quyền lưu ảnh vào thư viện Ảnh của bạn.</string>
+
+    <key>UIFileSharingEnabled</key>
+    <true/>
+
+    <key>LSSupportsOpeningDocumentsInPlace</key>
+    <true/>
+
+
+
+
     <!-- Cho phép lưu và xem file trong ứng dụng Tệp -->
     <key>UIFileSharingEnabled</key>
     <true/>
