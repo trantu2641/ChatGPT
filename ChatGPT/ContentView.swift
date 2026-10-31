@@ -150,7 +150,7 @@ struct WebView: UIViewRepresentable {
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
         private var isPresentingController = false
 
-        // MARK: - Image handler
+        // MARK: Image handler
 
         func userContentController(
             _ userContentController: WKUserContentController,
@@ -190,9 +190,12 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Image download
+        // MARK: Image download
 
-        private func downloadImageFromURL(_ url: URL, filename: String) {
+        private func downloadImageFromURL(
+            _ url: URL,
+            filename: String
+        ) {
             URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
                 DispatchQueue.main.async {
                     guard let self = self else { return }
@@ -209,12 +212,20 @@ struct WebView: UIViewRepresentable {
                         return
                     }
 
-                    self.showImageOptions(data: data, filename: filename)
+                    self.showImageOptions(
+                        data: data,
+                        filename: filename
+                    )
                 }
             }.resume()
         }
 
-        private func showImageOptions(data: Data, filename: String) {
+        // MARK: Image options
+
+        private func showImageOptions(
+            data: Data,
+            filename: String
+        ) {
             guard let image = UIImage(data: data) else {
                 showMessage(
                     title: "Ảnh không hợp lệ",
@@ -237,7 +248,7 @@ struct WebView: UIViewRepresentable {
             )
         }
 
-        // MARK: - Save Photos
+        // MARK: Save Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
             PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
@@ -266,11 +277,15 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Save Files
+        // MARK: Save Files
 
-        private func saveDataToFiles(_ data: Data, filename: String) {
+        private func saveDataToFiles(
+            _ data: Data,
+            filename: String
+        ) {
             do {
                 let directory = try downloadsDirectory()
+
                 let destination = uniqueURL(
                     in: directory,
                     filename: sanitizedFilename(filename)
@@ -282,6 +297,7 @@ struct WebView: UIViewRepresentable {
                     title: "Đã lưu tệp",
                     message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
                 )
+
             } catch {
                 showMessage(
                     title: "Lỗi lưu tệp",
@@ -290,7 +306,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Navigation policy
+        // MARK: Navigation policy
 
         func webView(
             _ webView: WKWebView,
@@ -309,23 +325,19 @@ struct WebView: UIViewRepresentable {
             decidePolicyFor navigationResponse: WKNavigationResponse,
             decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
         ) {
-            // Chỉ chuyển sang download nếu máy chủ xác định rõ
-            // đây là tệp đính kèm.
             if let response = navigationResponse.response as? HTTPURLResponse,
                let disposition = response.value(
                     forHTTPHeaderField: "Content-Disposition"
                ),
                disposition.localizedCaseInsensitiveContains("attachment") {
-
                 decisionHandler(.download)
                 return
             }
 
-            // Không ép mọi MIME không hỗ trợ thành download.
             decisionHandler(.allow)
         }
 
-        // MARK: - New window
+        // MARK: New window
 
         func webView(
             _ webView: WKWebView,
@@ -340,7 +352,7 @@ struct WebView: UIViewRepresentable {
             return nil
         }
 
-        // MARK: - WKDownload
+        // MARK: WKDownload
 
         func webView(
             _ webView: WKWebView,
@@ -366,12 +378,14 @@ struct WebView: UIViewRepresentable {
         ) {
             do {
                 let directory = try downloadsDirectory()
+
                 let destination = uniqueURL(
                     in: directory,
                     filename: sanitizedFilename(suggestedFilename)
                 )
 
                 downloadDestinations[ObjectIdentifier(download)] = destination
+
                 completionHandler(destination)
 
             } catch {
@@ -424,7 +438,7 @@ struct WebView: UIViewRepresentable {
             )
         }
 
-        // MARK: - Directory
+        // MARK: Directory
 
         private func downloadsDirectory() throws -> URL {
             let documents = FileManager.default.urls(
@@ -485,7 +499,7 @@ struct WebView: UIViewRepresentable {
             "image_\(Int(Date().timeIntervalSince1970)).jpg"
         }
 
-        // MARK: - Alerts
+        // MARK: Presentation
 
         private func topViewController() -> UIViewController? {
             guard let root = webView?.window?.rootViewController else {
@@ -521,7 +535,8 @@ struct WebView: UIViewRepresentable {
 
                 for item in actions {
                     alert.addAction(
-                        UIAlertAction(title: item.0, style: .default) { _ in
+                        UIAlertAction(title: item.0, style: .default) { [weak self] _ in
+                            guard let self = self else { return }
                             self.isPresentingController = false
                             item.1()
                         }
@@ -529,8 +544,8 @@ struct WebView: UIViewRepresentable {
                 }
 
                 alert.addAction(
-                    UIAlertAction(title: "Hủy", style: .cancel) { _ in
-                        self.isPresentingController = false
+                    UIAlertAction(title: "Hủy", style: .cancel) { [weak self] _ in
+                        self?.isPresentingController = false
                     }
                 )
 
@@ -547,13 +562,14 @@ struct WebView: UIViewRepresentable {
 
                 self.isPresentingController = true
 
-                presenter.present(alert, animated: true) {
-                    alert.presentationController?.delegate = self
-                }
+                presenter.present(alert, animated: true)
             }
         }
 
-        private func showMessage(title: String, message: String) {
+        private func showMessage(
+            title: String,
+            message: String
+        ) {
             DispatchQueue.main.async { [weak self] in
                 guard let self = self,
                       !self.isPresentingController,
@@ -568,25 +584,15 @@ struct WebView: UIViewRepresentable {
                 )
 
                 alert.addAction(
-                    UIAlertAction(title: "Đóng", style: .default) { _ in
-                        self.isPresentingController = false
+                    UIAlertAction(title: "Đóng", style: .default) { [weak self] _ in
+                        self?.isPresentingController = false
                     }
                 )
 
                 self.isPresentingController = true
 
-                presenter.present(alert, animated: true) {
-                    alert.presentationController?.delegate = self
-                }
+                presenter.present(alert, animated: true)
             }
         }
-    }
-}
-
-extension WebView.Coordinator: UIAdaptivePresentationControllerDelegate {
-    func presentationControllerDidDismiss(
-        _ presentationController: UIPresentationController
-    ) {
-        isPresentingController = false
     }
 }
