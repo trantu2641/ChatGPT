@@ -38,7 +38,7 @@ struct ContentView: View {
     }
 }
 
-// MARK: - WebView Store
+// MARK: - WebView Storage
 
 final class WebViewStore: ObservableObject {
     var webView: WKWebView?
@@ -63,11 +63,11 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
 
-        if let existing = store.webView {
-            existing.navigationDelegate = context.coordinator
-            existing.uiDelegate = context.coordinator
-            context.coordinator.webView = existing
-            return existing
+        if let existingWebView = store.webView {
+            existingWebView.navigationDelegate = context.coordinator
+            existingWebView.uiDelegate = context.coordinator
+            context.coordinator.webView = existingWebView
+            return existingWebView
         }
 
         let configuration = WKWebViewConfiguration()
@@ -82,29 +82,38 @@ struct WebView: UIViewRepresentable {
 
             window.__nativeUploadInput = null;
 
-            window.__nativeFindUploadInput = function() {
-                if (window.__nativeUploadInput &&
-                    window.__nativeUploadInput.isConnected) {
-                    return window.__nativeUploadInput;
-                }
+            document.addEventListener('click', function(event) {
+                const target = event.target;
 
-                const inputs = Array.from(
-                    document.querySelectorAll('input[type="file"]')
-                );
+                if (!target || !target.closest) return;
 
-                return inputs.find(function(input) {
-                    return !input.disabled;
-                }) || null;
-            };
+                const input = target.closest('input[type="file"]');
+
+                if (!input) return;
+
+                const accept = (input.accept || '').toLowerCase();
+
+                window.__nativeUploadInput = input;
+
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+
+                window.webkit.messageHandlers.uploadHandler.postMessage({
+                    multiple: input.multiple,
+                    accept: input.accept || ''
+                });
+            }, true);
 
             window.__nativeSetFiles = function(items) {
-                const input = window.__nativeFindUploadInput();
+                const input = window.__nativeUploadInput;
 
-                if (!input) {
+                if (!input || !input.isConnected) {
                     window.webkit.messageHandlers.uploadResult.postMessage({
                         success: false,
                         reason: 'input_missing'
                     });
+
                     return;
                 }
 
@@ -122,7 +131,9 @@ struct WebView: UIViewRepresentable {
                         const file = new File(
                             [bytes],
                             item.name,
-                            { type: item.type || 'application/octet-stream' }
+                            {
+                                type: item.type || 'application/octet-stream'
+                            }
                         );
 
                         transfer.items.add(file);
@@ -145,7 +156,7 @@ struct WebView: UIViewRepresentable {
                     });
 
                 } catch (error) {
-                    console.error(error);
+                    console.error('Native upload error:', error);
 
                     window.webkit.messageHandlers.uploadResult.postMessage({
                         success: false,
@@ -153,27 +164,6 @@ struct WebView: UIViewRepresentable {
                     });
                 }
             };
-
-            document.addEventListener('click', function(event) {
-                const target = event.target;
-
-                if (!target || !target.closest) return;
-
-                const input = target.closest('input[type="file"]');
-
-                if (!input) return;
-
-                event.preventDefault();
-                event.stopPropagation();
-                event.stopImmediatePropagation();
-
-                window.__nativeUploadInput = input;
-
-                window.webkit.messageHandlers.uploadHandler.postMessage({
-                    multiple: input.multiple,
-                    accept: input.accept || ''
-                });
-            }, true);
         })();
         """
 
@@ -185,7 +175,7 @@ struct WebView: UIViewRepresentable {
             )
         )
 
-        // MARK: Image Context Menu
+        // MARK: Image context menu
 
         let imageScript = """
         (function() {
@@ -207,7 +197,10 @@ struct WebView: UIViewRepresentable {
 
                 fetch(src, { credentials: 'include' })
                     .then(response => {
-                        if (!response.ok) throw new Error('Image fetch failed');
+                        if (!response.ok) {
+                            throw new Error('Image fetch failed');
+                        }
+
                         return response.blob();
                     })
                     .then(blob => {
@@ -272,8 +265,15 @@ struct WebView: UIViewRepresentable {
 
         webView.allowsBackForwardNavigationGestures = true
 
+        // Khôi phục địa chỉ trang cuối cùng nếu iOS đã đóng hẳn tiến trình app.
+        // Khi chỉ chuyển app ra nền rồi quay lại, WKWebView cũ vẫn được giữ nguyên,
+        // không gọi load() lại và không tải lại trang.
+        let savedURLString = UserDefaults.standard.string(forKey: "ChatGPT.LastWebViewURL")
+        let startURL = savedURLString.flatMap(URL.init(string:))
+            ?? URL(string: "https://chatgpt.com/")!
+
         let request = URLRequest(
-            url: URL(string: "https://chatgpt.com/")!,
+            url: startURL,
             cachePolicy: .useProtocolCachePolicy,
             timeoutInterval: 60
         )
@@ -284,14 +284,14 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Do not reload during SwiftUI updates.
+        // Do not reload the page during SwiftUI updates.
     }
 
     static func dismantleUIView(
         _ uiView: WKWebView,
         coordinator: Coordinator
     ) {
-        // Keep WebView alive.
+        // Keep the WebView alive in WebViewStore.
     }
 
     // MARK: - Coordinator
@@ -309,163 +309,17 @@ struct WebView: UIViewRepresentable {
         weak var webView: WKWebView?
 
         private var isPresentingController = false
-        private var isCameraOpen = false
-        private var isPickerOpen = false
-
-        private var needsWebRecovery = false
-        private var isRecovering = false
-        private var hasLoadedOnce = false
-
-        private var savedConversationURL: URL?
-        private var pendingUploadFiles: [UploadFile] = []
-
         private var allowsMultipleSelection = false
+        private var currentAccept = ""
+
         private var downloadDestinations: [ObjectIdentifier: URL] = [:]
 
-        private var activeNavigationURL: URL?
+        // MARK: Upload File Model
 
         private struct UploadFile {
             let data: Data
             let name: String
             let type: String
-        }
-
-        override init() {
-            super.init()
-
-            NotificationCenter.default.addObserver(
-                self,
-                selector: #selector(applicationDidBecomeActive),
-                name: UIApplication.didBecomeActiveNotification,
-                object: nil
-            )
-        }
-
-        deinit {
-            NotificationCenter.default.removeObserver(self)
-        }
-
-        // MARK: Application State
-
-        @objc private func applicationDidBecomeActive() {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                self.recoverIfNeeded()
-            }
-        }
-
-        private func saveCurrentConversation() {
-            guard let url = webView?.url,
-                  let scheme = url.scheme,
-                  scheme == "https" else {
-                return
-            }
-
-            savedConversationURL = url
-        }
-
-        private func recoverIfNeeded() {
-            guard needsWebRecovery,
-                  !isCameraOpen,
-                  !isPickerOpen,
-                  UIApplication.shared.applicationState == .active,
-                  let webView = webView else {
-                return
-            }
-
-            guard !isRecovering else {
-                return
-            }
-
-            isRecovering = true
-            needsWebRecovery = false
-
-            let restoreURL = savedConversationURL
-                ?? webView.url
-                ?? URL(string: "https://chatgpt.com/")!
-
-            print("Recovering ChatGPT WebView:", restoreURL.absoluteString)
-
-            webView.stopLoading()
-
-            var request = URLRequest(
-                url: restoreURL,
-                cachePolicy: .useProtocolCachePolicy,
-                timeoutInterval: 60
-            )
-
-            request.setValue(
-                "no-cache",
-                forHTTPHeaderField: "Cache-Control"
-            )
-
-            webView.load(request)
-        }
-
-        // MARK: Navigation Delegate
-
-        func webView(
-            _ webView: WKWebView,
-            didStartProvisionalNavigation navigation: WKNavigation!
-        ) {
-            activeNavigationURL = webView.url
-        }
-
-        func webView(
-            _ webView: WKWebView,
-            didFinish navigation: WKNavigation!
-        ) {
-            hasLoadedOnce = true
-            isRecovering = false
-
-            if let url = webView.url {
-                savedConversationURL = url
-            }
-
-            if !pendingUploadFiles.isEmpty {
-                let files = pendingUploadFiles
-                pendingUploadFiles.removeAll()
-
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.performUpload(files)
-                }
-            }
-        }
-
-        func webView(
-            _ webView: WKWebView,
-            didFail navigation: WKNavigation!,
-            withError error: Error
-        ) {
-            isRecovering = false
-            print("WebView navigation error:", error.localizedDescription)
-        }
-
-        func webView(
-            _ webView: WKWebView,
-            didFailProvisionalNavigation navigation: WKNavigation!,
-            withError error: Error
-        ) {
-            isRecovering = false
-            print("WebView provisional error:", error.localizedDescription)
-        }
-
-        func webViewWebContentProcessDidTerminate(
-            _ webView: WKWebView
-        ) {
-            print("ChatGPT WebContent process terminated.")
-
-            if let url = webView.url {
-                savedConversationURL = url
-            }
-
-            needsWebRecovery = true
-
-            // If the camera is still open, wait until it closes.
-            if !isCameraOpen && !isPickerOpen {
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                    self.recoverIfNeeded()
-                }
-            }
         }
 
         // MARK: JavaScript Messages
@@ -484,7 +338,9 @@ struct WebView: UIViewRepresentable {
                 allowsMultipleSelection =
                     payload["multiple"] as? Bool ?? false
 
-                saveCurrentConversation()
+                currentAccept =
+                    payload["accept"] as? String ?? ""
+
                 showUploadOptions()
 
             case "uploadResult":
@@ -496,7 +352,7 @@ struct WebView: UIViewRepresentable {
                     showMessage(
                         title: "Không thể đính kèm",
                         message: reason == "input_missing"
-                            ? "Không tìm thấy ô chọn tệp. Hãy mở lại nút đính kèm."
+                            ? "Ô chọn tệp không còn tồn tại. Hãy mở lại nút đính kèm và thử lại."
                             : "Không thể đưa ảnh vào ChatGPT. Hãy thử lại."
                     )
                 }
@@ -544,10 +400,6 @@ struct WebView: UIViewRepresentable {
                 return
             }
 
-            saveCurrentConversation()
-
-            isCameraOpen = true
-
             let picker = UIImagePickerController()
             picker.sourceType = .camera
             picker.mediaTypes = [UTType.image.identifier]
@@ -563,10 +415,7 @@ struct WebView: UIViewRepresentable {
         ) {
             guard let image = info[.originalImage] as? UIImage,
                   let data = image.jpegData(compressionQuality: 0.92) else {
-                picker.dismiss(animated: true) {
-                    self.isCameraOpen = false
-                    self.recoverIfNeeded()
-                }
+                picker.dismiss(animated: true)
                 return
             }
 
@@ -577,25 +426,14 @@ struct WebView: UIViewRepresentable {
             )
 
             picker.dismiss(animated: true) {
-                self.isCameraOpen = false
-                self.pendingUploadFiles = [file]
-
-                self.recoverIfNeeded()
-
-                if !self.needsWebRecovery && !self.isRecovering {
-                    self.pendingUploadFiles.removeAll()
-                    self.performUpload([file])
-                }
+                self.sendFilesToWebView([file])
             }
         }
 
         func imagePickerControllerDidCancel(
             _ picker: UIImagePickerController
         ) {
-            picker.dismiss(animated: true) {
-                self.isCameraOpen = false
-                self.recoverIfNeeded()
-            }
+            picker.dismiss(animated: true)
         }
 
         // MARK: Photo Library
@@ -604,9 +442,6 @@ struct WebView: UIViewRepresentable {
             guard let presenter = topViewController() else {
                 return
             }
-
-            saveCurrentConversation()
-            isPickerOpen = true
 
             var configuration = PHPickerConfiguration()
             configuration.filter = .images
@@ -617,6 +452,7 @@ struct WebView: UIViewRepresentable {
             )
 
             picker.delegate = self
+
             presenter.present(picker, animated: true)
         }
 
@@ -625,10 +461,7 @@ struct WebView: UIViewRepresentable {
             didFinishPicking results: [PHPickerResult]
         ) {
             guard !results.isEmpty else {
-                picker.dismiss(animated: true) {
-                    self.isPickerOpen = false
-                    self.recoverIfNeeded()
-                }
+                picker.dismiss(animated: true)
                 return
             }
 
@@ -667,14 +500,7 @@ struct WebView: UIViewRepresentable {
 
             group.notify(queue: .main) {
                 picker.dismiss(animated: true) {
-                    self.isPickerOpen = false
-                    self.pendingUploadFiles = files
-                    self.recoverIfNeeded()
-
-                    if !self.needsWebRecovery && !self.isRecovering {
-                        self.pendingUploadFiles.removeAll()
-                        self.performUpload(files)
-                    }
+                    self.sendFilesToWebView(files)
                 }
             }
         }
@@ -685,9 +511,6 @@ struct WebView: UIViewRepresentable {
             guard let presenter = topViewController() else {
                 return
             }
-
-            saveCurrentConversation()
-            isPickerOpen = true
 
             let picker = UIDocumentPickerViewController(
                 forOpeningContentTypes: [.item],
@@ -731,45 +554,30 @@ struct WebView: UIViewRepresentable {
                         lock.unlock()
 
                     } catch {
-                        // Skip unreadable files.
+                        // Skip files that cannot be read.
                     }
                 }
             }
 
             group.notify(queue: .main) {
-                self.isPickerOpen = false
-                self.pendingUploadFiles = files
-                self.recoverIfNeeded()
-
-                if !self.needsWebRecovery && !self.isRecovering {
-                    self.pendingUploadFiles.removeAll()
-                    self.performUpload(files)
-                }
+                self.sendFilesToWebView(files)
             }
         }
 
         func documentPickerWasCancelled(
             _ controller: UIDocumentPickerViewController
         ) {
-            isPickerOpen = false
-            recoverIfNeeded()
+            // Keep current ChatGPT page unchanged.
         }
 
-        // MARK: Upload Execution
+        // MARK: Send Files to WebView
 
-        private func performUpload(_ files: [UploadFile]) {
-            guard let webView = webView else {
-                pendingUploadFiles = files
-                return
-            }
-
+        private func sendFilesToWebView(_ files: [UploadFile]) {
             guard !files.isEmpty else {
-                return
-            }
-
-            guard !needsWebRecovery,
-                  !isRecovering else {
-                pendingUploadFiles = files
+                showMessage(
+                    title: "Không có tệp",
+                    message: "Không thể đọc nội dung đã chọn."
+                )
                 return
             }
 
@@ -777,16 +585,17 @@ struct WebView: UIViewRepresentable {
                 ? files
                 : Array(files.prefix(1))
 
-            let items: [[String: String]] = selectedFiles.map {
+            let items: [[String: String]] = selectedFiles.map { file in
                 [
-                    "data": $0.data.base64EncodedString(),
-                    "name": $0.name,
-                    "type": $0.type
+                    "data": file.data.base64EncodedString(),
+                    "name": file.name,
+                    "type": file.type
                 ]
             }
 
             guard let jsonData = try? JSONSerialization.data(
-                withJSONObject: items
+                withJSONObject: items,
+                options: []
             ),
             let json = String(data: jsonData, encoding: .utf8) else {
                 showMessage(
@@ -803,16 +612,20 @@ struct WebView: UIViewRepresentable {
                         success: false,
                         reason: 'handler_missing'
                     });
-                    return;
+                    return true;
                 }
 
                 window.__nativeSetFiles(\(json));
+
+                return true;
             })();
             """
 
-            webView.evaluateJavaScript(script) { _, error in
+            webView?.evaluateJavaScript(script) { _, error in
                 if let error = error {
-                    print("Upload error:", error.localizedDescription)
+                    print(
+                        "Upload JavaScript error: \(error.localizedDescription)"
+                    )
                 }
             }
         }
@@ -834,7 +647,9 @@ struct WebView: UIViewRepresentable {
             if let dataURL = payload["data"] as? String,
                let comma = dataURL.firstIndex(of: ",") {
 
-                let encoded = String(dataURL[dataURL.index(after: comma)...])
+                let encoded = String(
+                    dataURL[dataURL.index(after: comma)...]
+                )
 
                 guard let data = Data(base64Encoded: encoded) else {
                     return
@@ -842,7 +657,8 @@ struct WebView: UIViewRepresentable {
 
                 showImageOptions(
                     data: data,
-                    filename: payload["filename"] as? String ?? makeImageFilename()
+                    filename: payload["filename"] as? String
+                        ?? makeImageFilename()
                 )
 
             } else if let urlString = payload["url"] as? String,
@@ -895,7 +711,9 @@ struct WebView: UIViewRepresentable {
         // MARK: Save Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) {
+                status in
+
                 guard status == .authorized || status == .limited else {
                     DispatchQueue.main.async {
                         self.showMessage(
@@ -911,10 +729,13 @@ struct WebView: UIViewRepresentable {
                 }) { success, error in
                     DispatchQueue.main.async {
                         self.showMessage(
-                            title: success ? "Đã lưu ảnh" : "Không thể lưu ảnh",
+                            title: success
+                                ? "Đã lưu ảnh"
+                                : "Không thể lưu ảnh",
                             message: success
                                 ? "Ảnh đã được lưu vào thư viện."
-                                : (error?.localizedDescription ?? "Đã xảy ra lỗi.")
+                                : (error?.localizedDescription
+                                    ?? "Đã xảy ra lỗi.")
                         )
                     }
                 }
@@ -981,6 +802,8 @@ struct WebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
+        // MARK: New Window
+
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -992,6 +815,54 @@ struct WebView: UIViewRepresentable {
             }
 
             return nil
+        }
+
+        // MARK: Microphone / Camera permission for web pages
+
+        @available(iOS 15.0, *)
+        func webView(
+            _ webView: WKWebView,
+            requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+            initiatedByFrame frame: WKFrameInfo,
+            type: WKMediaCaptureType,
+            decisionHandler: @escaping (WKPermissionDecision) -> Void
+        ) {
+            // ChatGPT is served over HTTPS. Allow the website to request
+            // microphone/camera access; iOS still displays its system permission
+            // prompt the first time and the user controls it in Settings.
+            let host = origin.host.lowercased()
+            let isChatGPT = host == "chatgpt.com" || host.hasSuffix(".chatgpt.com")
+
+            guard origin.protocol.lowercased() == "https", isChatGPT else {
+                decisionHandler(.deny)
+                return
+            }
+
+            decisionHandler(.grant)
+        }
+
+        // Lưu URL hiện tại để có thể mở lại đúng cuộc trò chuyện sau khi
+        // hệ điều hành buộc đóng tiến trình. Không reload khi app chỉ vào nền.
+        func webView(
+            _ webView: WKWebView,
+            didFinish navigation: WKNavigation!
+        ) {
+            if let url = webView.url {
+                UserDefaults.standard.set(
+                    url.absoluteString,
+                    forKey: "ChatGPT.LastWebViewURL"
+                )
+            }
+        }
+
+        // MARK: Web Content Process
+
+        func webViewWebContentProcessDidTerminate(
+            _ webView: WKWebView
+        ) {
+            // Do not automatically reload.
+            // This avoids discarding the current page unnecessarily.
+            print("ChatGPT WebContent process terminated.")
         }
 
         // MARK: Downloads
@@ -1026,7 +897,10 @@ struct WebView: UIViewRepresentable {
                     filename: sanitizedFilename(suggestedFilename)
                 )
 
-                downloadDestinations[ObjectIdentifier(download)] = destination
+                downloadDestinations[
+                    ObjectIdentifier(download)
+                ] = destination
+
                 completionHandler(destination)
 
             } catch {
@@ -1091,7 +965,9 @@ struct WebView: UIViewRepresentable {
         }
 
         private func sanitizedFilename(_ filename: String) -> String {
-            let invalid = CharacterSet(charactersIn: "/\\:?%*|\"<>")
+            let invalid = CharacterSet(
+                charactersIn: "/\\:?%*|\"<>"
+            )
 
             let cleaned = filename
                 .components(separatedBy: invalid)
@@ -1114,7 +990,9 @@ struct WebView: UIViewRepresentable {
             var candidate = directory.appendingPathComponent(filename)
             var index = 1
 
-            while FileManager.default.fileExists(atPath: candidate.path) {
+            while FileManager.default.fileExists(
+                atPath: candidate.path
+            ) {
                 let newName = ext.isEmpty
                     ? "\(name)_\(index)"
                     : "\(name)_\(index).\(ext)"
@@ -1165,7 +1043,10 @@ struct WebView: UIViewRepresentable {
 
                 for item in actions {
                     alert.addAction(
-                        UIAlertAction(title: item.0, style: .default) { _ in
+                        UIAlertAction(
+                            title: item.0,
+                            style: .default
+                        ) { _ in
                             self.isPresentingController = false
                             item.1()
                         }
@@ -1173,7 +1054,10 @@ struct WebView: UIViewRepresentable {
                 }
 
                 alert.addAction(
-                    UIAlertAction(title: "Hủy", style: .cancel) { _ in
+                    UIAlertAction(
+                        title: "Hủy",
+                        style: .cancel
+                    ) { _ in
                         self.isPresentingController = false
                     }
                 )
@@ -1211,7 +1095,10 @@ struct WebView: UIViewRepresentable {
                 )
 
                 alert.addAction(
-                    UIAlertAction(title: "Đóng", style: .default) { _ in
+                    UIAlertAction(
+                        title: "Đóng",
+                        style: .default
+                    ) { _ in
                         self.isPresentingController = false
                     }
                 )
