@@ -58,6 +58,9 @@
     <key>NSPhotoLibraryAddUsageDescription</key>
     <string>Ứng dụng cần quyền để lưu hình ảnh vào thư viện Ảnh.</string>
 
+    <key>NSCameraUsageDescription</key>
+    <string>ChatGPT cần sử dụng camera để chụp ảnh và gửi vào cuộc trò chuyện.</string>
+
     <key>NSAppTransportSecurity</key>
     <dict>
         <key>NSAllowsArbitraryLoads</key>
