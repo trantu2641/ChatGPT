@@ -3,6 +3,8 @@ import SwiftUI
 import WebKit
 import UIKit
 import Photos
+import PhotosUI
+import UniformTypeIdentifiers
 
 // MARK: - Main View
 
@@ -61,19 +63,109 @@ struct WebView: UIViewRepresentable {
 
     func makeUIView(context: Context) -> WKWebView {
 
-        // Reuse WebView to avoid reloading ChatGPT.
-        if let existingWebView = store.webView {
-            existingWebView.navigationDelegate = context.coordinator
-            existingWebView.uiDelegate = context.coordinator
-            context.coordinator.webView = existingWebView
-            return existingWebView
+        if let existing = store.webView {
+            existing.navigationDelegate = context.coordinator
+            existing.uiDelegate = context.coordinator
+            context.coordinator.webView = existing
+            return existing
         }
 
         let configuration = WKWebViewConfiguration()
         let controller = WKUserContentController()
 
-        // MARK: Image context menu
+        // MARK: JavaScript bridge
 
+        let uploadScript = """
+        (function() {
+            if (window.__nativeUploadInstalled) return;
+            window.__nativeUploadInstalled = true;
+
+            window.__nativeUploadInput = null;
+
+            document.addEventListener('click', function(event) {
+                const input = event.target.closest('input[type="file"]');
+
+                if (!input) return;
+
+                const accept = (input.accept || '').toLowerCase();
+
+                // Only intercept image or general attachment inputs.
+                const isImage = accept.includes('image');
+                const isGeneral = accept === '' ||
+                                  accept.includes('*') ||
+                                  accept.includes('.');
+
+                if (!isImage && !isGeneral) return;
+
+                event.preventDefault();
+                event.stopPropagation();
+                event.stopImmediatePropagation();
+
+                window.__nativeUploadInput = input;
+
+                window.webkit.messageHandlers.uploadHandler.postMessage({
+                    multiple: input.multiple,
+                    accept: input.accept || ''
+                });
+            }, true);
+
+            window.__nativeSetFiles = function(items) {
+                const input = window.__nativeUploadInput;
+
+                if (!input || !input.isConnected) {
+                    return false;
+                }
+
+                try {
+                    const transfer = new DataTransfer();
+
+                    items.forEach(function(item) {
+                        const binary = atob(item.data);
+                        const bytes = new Uint8Array(binary.length);
+
+                        for (let i = 0; i < binary.length; i++) {
+                            bytes[i] = binary.charCodeAt(i);
+                        }
+
+                        const file = new File(
+                            [bytes],
+                            item.name,
+                            { type: item.type || 'application/octet-stream' }
+                        );
+
+                        transfer.items.add(file);
+                    });
+
+                    input.files = transfer.files;
+
+                    input.dispatchEvent(new Event('input', {
+                        bubbles: true
+                    }));
+
+                    input.dispatchEvent(new Event('change', {
+                        bubbles: true
+                    }));
+
+                    window.__nativeUploadInput = null;
+
+                    return true;
+                } catch (error) {
+                    console.error('Native upload error:', error);
+                    return false;
+                }
+            };
+        })();
+        """
+
+        controller.addUserScript(
+            WKUserScript(
+                source: uploadScript,
+                injectionTime: .atDocumentEnd,
+                forMainFrameOnly: false
+            )
+        )
+
+        // Image context menu script
         let imageScript = """
         (function() {
             if (window.__nativeImageMenuInstalled) return;
@@ -125,11 +217,10 @@ struct WebView: UIViewRepresentable {
             )
         )
 
+        controller.add(context.coordinator, name: "uploadHandler")
         controller.add(context.coordinator, name: "imageHandler")
 
         configuration.userContentController = controller
-
-        // Persistent cookies, login and website data.
         configuration.websiteDataStore = .default()
 
         let webView = WKWebView(
@@ -149,8 +240,6 @@ struct WebView: UIViewRepresentable {
 
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.alwaysBounceVertical = true
-
-        // Improve touch responsiveness.
         webView.scrollView.delaysContentTouches = false
         webView.scrollView.panGestureRecognizer.delaysTouchesBegan = false
         webView.scrollView.canCancelContentTouches = true
@@ -159,7 +248,6 @@ struct WebView: UIViewRepresentable {
 
         webView.allowsBackForwardNavigationGestures = true
 
-        // Load ChatGPT only once.
         let request = URLRequest(
             url: URL(string: "https://chatgpt.com/")!,
             cachePolicy: .useProtocolCachePolicy,
@@ -172,14 +260,14 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ uiView: WKWebView, context: Context) {
-        // Do not reload the page during SwiftUI updates.
+        // Do not reload during SwiftUI updates.
     }
 
     static func dismantleUIView(
         _ uiView: WKWebView,
         coordinator: Coordinator
     ) {
-        // Keep WebView and coordinator alive.
+        // Keep the existing WebView alive.
     }
 
     // MARK: - Coordinator
@@ -188,35 +276,334 @@ struct WebView: UIViewRepresentable {
                              WKNavigationDelegate,
                              WKUIDelegate,
                              WKScriptMessageHandler,
-                             WKDownloadDelegate {
+                             WKDownloadDelegate,
+                             UIImagePickerControllerDelegate,
+                             UINavigationControllerDelegate,
+                             PHPickerViewControllerDelegate,
+                             UIDocumentPickerDelegate {
 
         weak var webView: WKWebView?
 
-        private var downloadDestinations: [ObjectIdentifier: URL] = [:]
         private var isPresentingController = false
+        private var allowsMultipleSelection = false
+        private var currentAccept = ""
 
-        // MARK: Image Handler
+        private var downloadDestinations: [ObjectIdentifier: URL] = [:]
+
+        // MARK: JavaScript messages
 
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-            guard message.name == "imageHandler",
-                  let payload = message.body as? [String: Any] else {
+            guard let payload = message.body as? [String: Any] else {
                 return
             }
 
+            if message.name == "uploadHandler" {
+                allowsMultipleSelection = payload["multiple"] as? Bool ?? false
+                currentAccept = payload["accept"] as? String ?? ""
+
+                showUploadOptions()
+                return
+            }
+
+            if message.name == "imageHandler" {
+                handleImageMessage(payload)
+            }
+        }
+
+        // MARK: Upload menu
+
+        private func showUploadOptions() {
+            presentActionSheet(
+                title: "Đính kèm",
+                message: "Chọn cách thêm nội dung",
+                actions: [
+                    ("Camera", {
+                        self.openCamera()
+                    }),
+                    ("Thư viện ảnh", {
+                        self.openPhotoLibrary()
+                    }),
+                    ("Tệp", {
+                        self.openDocumentPicker()
+                    })
+                ]
+            )
+        }
+
+        // MARK: Camera
+
+        private func openCamera() {
+            guard UIImagePickerController.isSourceTypeAvailable(.camera) else {
+                showMessage(
+                    title: "Camera không khả dụng",
+                    message: "Thiết bị không có camera khả dụng."
+                )
+                return
+            }
+
+            guard let presenter = topViewController() else {
+                return
+            }
+
+            let picker = UIImagePickerController()
+            picker.sourceType = .camera
+            picker.mediaTypes = [UTType.image.identifier]
+            picker.allowsEditing = false
+            picker.delegate = self
+
+            presenter.present(picker, animated: true)
+        }
+
+        func imagePickerController(
+            _ picker: UIImagePickerController,
+            didFinishPickingMediaWithInfo info: [UIImagePickerController.InfoKey: Any]
+        ) {
+            guard let image = info[.originalImage] as? UIImage,
+                  let data = image.jpegData(compressionQuality: 0.92) else {
+                picker.dismiss(animated: true)
+                return
+            }
+
+            let name = makeImageFilename()
+
+            picker.dismiss(animated: true) {
+                self.sendFilesToWebView([
+                    UploadFile(
+                        data: data,
+                        name: name,
+                        type: "image/jpeg"
+                    )
+                ])
+            }
+        }
+
+        func imagePickerControllerDidCancel(
+            _ picker: UIImagePickerController
+        ) {
+            picker.dismiss(animated: true)
+        }
+
+        // MARK: Photo Library
+
+        private func openPhotoLibrary() {
+            guard let presenter = topViewController() else {
+                return
+            }
+
+            var configuration = PHPickerConfiguration()
+            configuration.filter = .images
+            configuration.selectionLimit = allowsMultipleSelection ? 0 : 1
+
+            let picker = PHPickerViewController(configuration: configuration)
+            picker.delegate = self
+
+            presenter.present(picker, animated: true)
+        }
+
+        func picker(
+            _ picker: PHPickerViewController,
+            didFinishPicking results: [PHPickerResult]
+        ) {
+            guard !results.isEmpty else {
+                picker.dismiss(animated: true)
+                return
+            }
+
+            let group = DispatchGroup()
+            let lock = NSLock()
+
+            var files: [UploadFile] = []
+
+            for result in results {
+                group.enter()
+
+                result.itemProvider.loadObject(ofClass: UIImage.self) {
+                    object, error in
+
+                    defer { group.leave() }
+
+                    guard error == nil,
+                          let image = object as? UIImage,
+                          let data = image.jpegData(compressionQuality: 0.92) else {
+                        return
+                    }
+
+                    let file = UploadFile(
+                        data: data,
+                        name: self.makeImageFilename(),
+                        type: "image/jpeg"
+                    )
+
+                    lock.lock()
+                    files.append(file)
+                    lock.unlock()
+                }
+            }
+
+            group.notify(queue: .main) {
+                picker.dismiss(animated: true) {
+                    self.sendFilesToWebView(files)
+                }
+            }
+        }
+
+        // MARK: Document Picker
+
+        private func openDocumentPicker() {
+            guard let presenter = topViewController() else {
+                return
+            }
+
+            let picker = UIDocumentPickerViewController(
+                forOpeningContentTypes: [.item],
+                asCopy: true
+            )
+
+            picker.allowsMultipleSelection = allowsMultipleSelection
+            picker.delegate = self
+
+            presenter.present(picker, animated: true)
+        }
+
+        func documentPicker(
+            _ controller: UIDocumentPickerViewController,
+            didPickDocumentsAt urls: [URL]
+        ) {
+            let group = DispatchGroup()
+            var files: [UploadFile] = []
+            let lock = NSLock()
+
+            for url in urls {
+                group.enter()
+
+                DispatchQueue.global(qos: .userInitiated).async {
+                    defer { group.leave() }
+
+                    do {
+                        let data = try Data(contentsOf: url)
+
+                        let file = UploadFile(
+                            data: data,
+                            name: url.lastPathComponent,
+                            type: self.mimeType(for: url)
+                        )
+
+                        lock.lock()
+                        files.append(file)
+                        lock.unlock()
+                    } catch {
+                        // Skip files that cannot be read.
+                    }
+                }
+            }
+
+            group.notify(queue: .main) {
+                self.sendFilesToWebView(files)
+            }
+        }
+
+        func documentPickerWasCancelled(
+            _ controller: UIDocumentPickerViewController
+        ) {
+            // Keep the current ChatGPT page unchanged.
+        }
+
+        // MARK: Send file into ChatGPT
+
+        private struct UploadFile {
+            let data: Data
+            let name: String
+            let type: String
+        }
+
+        private func sendFilesToWebView(_ files: [UploadFile]) {
+            guard !files.isEmpty else {
+                showMessage(
+                    title: "Không có ảnh",
+                    message: "Không thể đọc nội dung đã chọn."
+                )
+                return
+            }
+
+            let selectedFiles = allowsMultipleSelection
+                ? files
+                : Array(files.prefix(1))
+
+            let items: [[String: String]] = selectedFiles.map {
+                [
+                    "data": $0.data.base64EncodedString(),
+                    "name": $0.name,
+                    "type": $0.type
+                ]
+            }
+
+            guard let jsonData = try? JSONSerialization.data(
+                withJSONObject: items,
+                options: []
+            ),
+            let json = String(data: jsonData, encoding: .utf8) else {
+                showMessage(
+                    title: "Lỗi ảnh",
+                    message: "Không thể chuẩn bị dữ liệu ảnh."
+                )
+                return
+            }
+
+            let script = """
+            (function() {
+                if (typeof window.__nativeSetFiles !== 'function') {
+                    return 'handler_missing';
+                }
+
+                return window.__nativeSetFiles(\(json));
+            })();
+            """
+
+            webView?.evaluateJavaScript(script) { result, error in
+                DispatchQueue.main.async {
+                    if let error = error {
+                        self.showMessage(
+                            title: "Không thể đính kèm",
+                            message: error.localizedDescription
+                        )
+                        return
+                    }
+
+                    if let success = result as? Bool, success {
+                        // File has been inserted into ChatGPT's file input.
+                    } else {
+                        self.showMessage(
+                            title: "Không thể đính kèm",
+                            message: "Ô chọn tệp không còn tồn tại. Hãy thử chọn ảnh lại."
+                        )
+                    }
+                }
+            }
+        }
+
+        // MARK: MIME type
+
+        private func mimeType(for url: URL) -> String {
+            if let type = UTType(filenameExtension: url.pathExtension),
+               let mime = type.preferredMIMEType {
+                return mime
+            }
+
+            return "application/octet-stream"
+        }
+
+        // MARK: Image Context Menu
+
+        private func handleImageMessage(_ payload: [String: Any]) {
             if let dataURL = payload["data"] as? String,
                let comma = dataURL.firstIndex(of: ",") {
 
                 let encoded = String(dataURL[dataURL.index(after: comma)...])
 
-                guard let data = Data(base64Encoded: encoded),
-                      !data.isEmpty else {
-                    showMessage(
-                        title: "Không thể lưu ảnh",
-                        message: "Dữ liệu ảnh không hợp lệ."
-                    )
+                guard let data = Data(base64Encoded: encoded) else {
                     return
                 }
 
@@ -228,41 +615,23 @@ struct WebView: UIViewRepresentable {
             } else if let urlString = payload["url"] as? String,
                       let url = URL(string: urlString) {
 
-                downloadImageFromURL(
-                    url,
-                    filename: payload["filename"] as? String ?? makeImageFilename()
-                )
-            }
-        }
+                URLSession.shared.dataTask(with: url) { data, _, error in
+                    DispatchQueue.main.async {
+                        guard error == nil, let data = data else {
+                            self.showMessage(
+                                title: "Không thể tải ảnh",
+                                message: "Không thể lấy dữ liệu ảnh."
+                            )
+                            return
+                        }
 
-        // MARK: Download Image
-
-        private func downloadImageFromURL(
-            _ url: URL,
-            filename: String
-        ) {
-            URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
-                DispatchQueue.main.async {
-                    guard let self = self else { return }
-
-                    guard error == nil,
-                          let response = response as? HTTPURLResponse,
-                          (200...299).contains(response.statusCode),
-                          let data = data,
-                          !data.isEmpty else {
-                        self.showMessage(
-                            title: "Không thể tải ảnh",
-                            message: "Máy chủ không cho phép tải ảnh này."
+                        self.showImageOptions(
+                            data: data,
+                            filename: payload["filename"] as? String ?? self.makeImageFilename()
                         )
-                        return
                     }
-
-                    self.showImageOptions(
-                        data: data,
-                        filename: filename
-                    )
-                }
-            }.resume()
+                }.resume()
+            }
         }
 
         private func showImageOptions(
@@ -270,10 +639,6 @@ struct WebView: UIViewRepresentable {
             filename: String
         ) {
             guard let image = UIImage(data: data) else {
-                showMessage(
-                    title: "Ảnh không hợp lệ",
-                    message: "Không thể đọc dữ liệu ảnh."
-                )
                 return
             }
 
@@ -291,17 +656,17 @@ struct WebView: UIViewRepresentable {
             )
         }
 
-        // MARK: Save to Photos
+        // MARK: Save Photos
 
         private func saveImageToPhotos(_ image: UIImage) {
-            PHPhotoLibrary.requestAuthorization(for: .addOnly) { [weak self] status in
-                guard let self = self else { return }
-
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
                 guard status == .authorized || status == .limited else {
-                    self.showMessage(
-                        title: "Chưa được cấp quyền",
-                        message: "Hãy cấp quyền thêm ảnh trong Cài đặt iPhone."
-                    )
+                    DispatchQueue.main.async {
+                        self.showMessage(
+                            title: "Chưa được cấp quyền",
+                            message: "Hãy cấp quyền thêm ảnh trong Cài đặt iPhone."
+                        )
+                    }
                     return
                 }
 
@@ -320,7 +685,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Save to Files
+        // MARK: Save Files
 
         private func saveDataToFiles(
             _ data: Data,
@@ -340,7 +705,6 @@ struct WebView: UIViewRepresentable {
                     title: "Đã lưu tệp",
                     message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
                 )
-
             } catch {
                 showMessage(
                     title: "Lỗi lưu tệp",
@@ -349,7 +713,7 @@ struct WebView: UIViewRepresentable {
             }
         }
 
-        // MARK: Navigation Policy
+        // MARK: Navigation
 
         func webView(
             _ webView: WKWebView,
@@ -380,8 +744,6 @@ struct WebView: UIViewRepresentable {
             decisionHandler(.allow)
         }
 
-        // MARK: New Window
-
         func webView(
             _ webView: WKWebView,
             createWebViewWith configuration: WKWebViewConfiguration,
@@ -395,7 +757,15 @@ struct WebView: UIViewRepresentable {
             return nil
         }
 
-        // MARK: WKDownload
+        // MARK: Web Content Process
+
+        func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+            // Do not automatically reload.
+            // Automatic reload could discard the user's current conversation.
+            print("ChatGPT WebContent process terminated.")
+        }
+
+        // MARK: Downloads
 
         func webView(
             _ webView: WKWebView,
@@ -428,7 +798,6 @@ struct WebView: UIViewRepresentable {
                 )
 
                 downloadDestinations[ObjectIdentifier(download)] = destination
-
                 completionHandler(destination)
 
             } catch {
@@ -447,22 +816,12 @@ struct WebView: UIViewRepresentable {
             )
 
             guard let destination = destination else {
-                showMessage(
-                    title: "Tải xuống hoàn tất",
-                    message: "Hãy kiểm tra thư mục Downloads."
-                )
                 return
             }
 
-            let exists = FileManager.default.fileExists(
-                atPath: destination.path
-            )
-
             showMessage(
-                title: exists ? "Tải xuống hoàn tất" : "Không tìm thấy tệp",
-                message: exists
-                    ? "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
-                    : "Không tìm thấy tệp sau khi tải."
+                title: "Tải xuống hoàn tất",
+                message: "Đã lưu \(destination.lastPathComponent) vào ChatGPT/Downloads."
             )
         }
 
@@ -563,9 +922,8 @@ struct WebView: UIViewRepresentable {
             message: String,
             actions: [(String, () -> Void)]
         ) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self,
-                      !self.isPresentingController,
+            DispatchQueue.main.async {
+                guard !self.isPresentingController,
                       let presenter = self.topViewController() else {
                     return
                 }
@@ -578,8 +936,7 @@ struct WebView: UIViewRepresentable {
 
                 for item in actions {
                     alert.addAction(
-                        UIAlertAction(title: item.0, style: .default) { [weak self] _ in
-                            guard let self = self else { return }
+                        UIAlertAction(title: item.0, style: .default) { _ in
                             self.isPresentingController = false
                             item.1()
                         }
@@ -587,8 +944,8 @@ struct WebView: UIViewRepresentable {
                 }
 
                 alert.addAction(
-                    UIAlertAction(title: "Hủy", style: .cancel) { [weak self] _ in
-                        self?.isPresentingController = false
+                    UIAlertAction(title: "Hủy", style: .cancel) { _ in
+                        self.isPresentingController = false
                     }
                 )
 
@@ -612,9 +969,8 @@ struct WebView: UIViewRepresentable {
             title: String,
             message: String
         ) {
-            DispatchQueue.main.async { [weak self] in
-                guard let self = self,
-                      !self.isPresentingController,
+            DispatchQueue.main.async {
+                guard !self.isPresentingController,
                       let presenter = self.topViewController() else {
                     return
                 }
@@ -626,8 +982,8 @@ struct WebView: UIViewRepresentable {
                 )
 
                 alert.addAction(
-                    UIAlertAction(title: "Đóng", style: .default) { [weak self] _ in
-                        self?.isPresentingController = false
+                    UIAlertAction(title: "Đóng", style: .default) { _ in
+                        self.isPresentingController = false
                     }
                 )
 
