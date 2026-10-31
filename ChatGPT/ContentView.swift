@@ -2,9 +2,9 @@
 import SwiftUI
 import WebKit
 import UIKit
+import Photos
 
 struct ContentView: View {
-
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
@@ -36,16 +36,21 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
         controller.add(
             context.coordinator,
-            name: "chatGPTDownload"
+            name: "chatGPTImageAction"
         )
 
-        controller.addUserScript(
-            WKUserScript(
-                source: Self.downloadScript,
-                injectionTime: .atDocumentEnd,
-                forMainFrameOnly: false
-            )
+        controller.add(
+            context.coordinator,
+            name: "chatGPTImageData"
         )
+
+        let script = WKUserScript(
+            source: Self.imageScript,
+            injectionTime: .atDocumentEnd,
+            forMainFrameOnly: false
+        )
+
+        controller.addUserScript(script)
 
         let configuration = WKWebViewConfiguration()
         configuration.userContentController = controller
@@ -59,13 +64,14 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
         webView.navigationDelegate = context.coordinator
         webView.uiDelegate = context.coordinator
-
         webView.allowsBackForwardNavigationGestures = true
         webView.allowsLinkPreview = true
 
         webView.scrollView.showsVerticalScrollIndicator = false
         webView.scrollView.showsHorizontalScrollIndicator = false
         webView.scrollView.keyboardDismissMode = .interactive
+
+        webView.scrollView.contentInsetAdjustmentBehavior = .never
 
         webView.isOpaque = true
         webView.backgroundColor = .black
@@ -85,60 +91,72 @@ private struct ChatGPTWebView: UIViewRepresentable {
         context: Context
     ) {}
 
-    // MARK: - Blob Download Script
+    // MARK: - Image interaction
 
-    static let downloadScript = """
+    static let imageScript = """
     (() => {
-        if (window.__chatGPTDownloadInstalled) return;
-        window.__chatGPTDownloadInstalled = true;
+        if (window.__chatGPTImageHandlerInstalled) return;
+        window.__chatGPTImageHandlerInstalled = true;
 
-        document.addEventListener('click', function(event) {
-            const link = event.target.closest('a');
+        function getImage(element) {
+            if (!element) return null;
 
-            if (!link) return;
+            const image = element.closest('img');
 
-            const url = link.href || '';
+            if (!image) return null;
 
-            if (!url.startsWith('blob:')) return;
+            return image.currentSrc || image.src || null;
+        }
+
+        document.addEventListener('contextmenu', function(event) {
+            const src = getImage(event.target);
+
+            if (!src) return;
 
             event.preventDefault();
-            event.stopImmediatePropagation();
+            event.stopPropagation();
 
-            window.webkit.messageHandlers.chatGPTDownload.postMessage({
-                type: 'blob',
-                url: url,
-                filename: link.download || 'download'
+            window.webkit.messageHandlers.chatGPTImageAction.postMessage({
+                src: src,
+                alt: event.target.alt || ''
             });
-
         }, true);
 
-        window.__chatGPTReadBlob = function(url, filename) {
+        window.__chatGPTReadImage = function(src, filename) {
+            fetch(src, { credentials: 'include' })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error('Image request failed: ' + response.status);
+                    }
 
-            fetch(url)
-                .then(response => response.blob())
+                    return response.blob();
+                })
                 .then(blob => {
-
                     const reader = new FileReader();
 
                     reader.onload = function() {
-
                         const result = reader.result;
 
-                        window.webkit.messageHandlers.chatGPTDownload.postMessage({
-                            type: 'data',
+                        window.webkit.messageHandlers.chatGPTImageData.postMessage({
                             filename: filename,
-                            data: result.split(',')[1]
+                            data: result.split(',')[1],
+                            mime: blob.type || 'image/jpeg'
                         });
                     };
 
                     reader.onerror = function() {
-                        console.error('Cannot read Blob');
+                        console.error('Image read failed');
                     };
 
                     reader.readAsDataURL(blob);
                 })
                 .catch(error => {
-                    console.error('Blob download error:', error);
+                    console.error('Image save error:', error);
+
+                    window.webkit.messageHandlers.chatGPTImageData.postMessage({
+                        error: String(error),
+                        filename: filename
+                    });
                 });
         };
     })();
@@ -157,13 +175,10 @@ private struct ChatGPTWebView: UIViewRepresentable {
         private var activeDownloads: [ObjectIdentifier: URL] = [:]
 
         private var downloadsDirectory: URL {
-
-            let documents = FileManager.default.urls(
+            FileManager.default.urls(
                 for: .documentDirectory,
                 in: .userDomainMask
-            )[0]
-
-            return documents.appendingPathComponent(
+            )[0].appendingPathComponent(
                 "Downloads",
                 isDirectory: true
             )
@@ -171,88 +186,85 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
         override init() {
             super.init()
-
             createDownloadsDirectory()
         }
 
         // MARK: - Directory
 
         private func createDownloadsDirectory() {
-
             do {
                 try FileManager.default.createDirectory(
                     at: downloadsDirectory,
-                    withIntermediateDirectories: true,
-                    attributes: nil
+                    withIntermediateDirectories: true
                 )
-
-                print("DOWNLOAD DIRECTORY:")
-                print(downloadsDirectory.path)
-
             } catch {
-                print("DIRECTORY ERROR: \(error)")
+                print("Downloads directory error: \(error)")
             }
         }
 
-        // MARK: - JavaScript Message
+        // MARK: - Script messages
 
         func userContentController(
             _ userContentController: WKUserContentController,
             didReceive message: WKScriptMessage
         ) {
-
-            guard
-                message.name == "chatGPTDownload",
-                let body = message.body as? [String: Any],
-                let type = body["type"] as? String
-            else {
+            guard let body = message.body as? [String: Any] else {
                 return
             }
 
-            if type == "blob" {
-
-                guard
-                    let url = body["url"] as? String,
-                    let filename = body["filename"] as? String
-                else {
+            if message.name == "chatGPTImageAction" {
+                guard let src = body["src"] as? String else {
                     return
                 }
 
-                confirmBlobDownload(
-                    url: url,
-                    filename: filename
-                )
+                let alt = body["alt"] as? String ?? ""
+                showImageOptions(src: src, alt: alt)
             }
 
-            if type == "data" {
+            if message.name == "chatGPTImageData" {
+                if let error = body["error"] as? String {
+                    showError("Không thể lấy ảnh: \(error)")
+                    return
+                }
 
                 guard
-                    let filename = body["filename"] as? String,
                     let base64 = body["data"] as? String,
                     let data = Data(base64Encoded: base64)
                 else {
-                    showError("Dữ liệu tệp không hợp lệ.")
+                    showError("Dữ liệu ảnh không hợp lệ.")
                     return
                 }
 
-                saveBlobFile(
-                    data,
-                    filename: filename
-                )
+                let filename = body["filename"] as? String ?? "image.jpg"
+                saveImageData(data, filename: filename)
             }
         }
 
-        // MARK: - Blob Confirmation
+        // MARK: - Image menu
 
-        private func confirmBlobDownload(
-            url: String,
-            filename: String
-        ) {
-
+        private func showImageOptions(src: String, alt: String) {
             let alert = UIAlertController(
-                title: "Tải xuống tệp?",
-                message: "Bạn có muốn lưu \(filename) vào ứng dụng Tệp?",
-                preferredStyle: .alert
+                title: "Ảnh",
+                message: alt.isEmpty ? "Chọn thao tác với ảnh." : alt,
+                preferredStyle: .actionSheet
+            )
+
+            alert.addAction(
+                UIAlertAction(
+                    title: "Lưu vào Ảnh",
+                    style: .default
+                ) { [weak self] _ in
+                    self?.requestImageData(src: src)
+                }
+            )
+
+            alert.addAction(
+                UIAlertAction(
+                    title: "Tải ảnh về Tệp",
+                    style: .default
+                ) { [weak self] _ in
+                    self?.requestImageData(src: src)
+                }
             )
 
             alert.addAction(
@@ -262,45 +274,109 @@ private struct ChatGPTWebView: UIViewRepresentable {
                 )
             )
 
-            alert.addAction(
-                UIAlertAction(
-                    title: "Tải xuống",
-                    style: .default
-                ) { [weak self] _ in
-
-                    guard let self else { return }
-
-                    let script = """
-                    window.__chatGPTReadBlob(
-                        \(Self.jsonString(url)),
-                        \(Self.jsonString(filename))
-                    );
-                    """
-
-                    self.webView?.evaluateJavaScript(
-                        script,
-                        completionHandler: { _, error in
-                            if let error {
-                                print("BLOB ERROR: \(error)")
-                            }
-                        }
-                    )
-                }
-            )
-
             present(alert)
         }
 
-        // MARK: - Navigation Download
+        private func requestImageData(src: String) {
+            let filename = Self.filenameFromURL(src)
+
+            let script = """
+            window.__chatGPTReadImage(
+                \(Self.jsonString(src)),
+                \(Self.jsonString(filename))
+            );
+            """
+
+            webView?.evaluateJavaScript(
+                script,
+                completionHandler: { _, error in
+                    if let error {
+                        print("Image JavaScript error: \(error)")
+                    }
+                }
+            )
+        }
+
+        // MARK: - Save image
+
+        private func saveImageData(
+            _ data: Data,
+            filename: String
+        ) {
+            guard let image = UIImage(data: data) else {
+                showError("Không thể đọc dữ liệu hình ảnh.")
+                return
+            }
+
+            saveToPhotoLibrary(image)
+            saveImageToFiles(data, filename: filename)
+        }
+
+        private func saveToPhotoLibrary(_ image: UIImage) {
+            PHPhotoLibrary.requestAuthorization(for: .addOnly) {
+                [weak self] status in
+
+                guard let self else { return }
+
+                guard status == .authorized || status == .limited else {
+                    self.showError(
+                        "Ứng dụng chưa được cấp quyền thêm ảnh vào thư viện."
+                    )
+                    return
+                }
+
+                PHPhotoLibrary.shared().performChanges({
+                    PHAssetChangeRequest.creationRequestForAsset(
+                        from: image
+                    )
+                }) { success, error in
+
+                    DispatchQueue.main.async {
+                        if success {
+                            self.showMessage(
+                                title: "Đã lưu ảnh",
+                                message: "Ảnh đã được lưu vào ứng dụng Ảnh."
+                            )
+                        } else {
+                            self.showError(
+                                error?.localizedDescription ?? "Không thể lưu ảnh."
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        private func saveImageToFiles(
+            _ data: Data,
+            filename: String
+        ) {
+            do {
+                createDownloadsDirectory()
+
+                let destination = uniqueDestination(
+                    filename: filename
+                )
+
+                try data.write(
+                    to: destination,
+                    options: .atomic
+                )
+
+                print("Image saved to Files: \(destination.path)")
+
+            } catch {
+                print("Image file save error: \(error)")
+            }
+        }
+
+        // MARK: - Download navigation
 
         func webView(
             _ webView: WKWebView,
             navigationAction: WKNavigationAction,
             didBecome download: WKDownload
         ) {
-
-            print("NAVIGATION DOWNLOAD STARTED")
-
             download.delegate = self
         }
 
@@ -309,9 +385,6 @@ private struct ChatGPTWebView: UIViewRepresentable {
             navigationResponse: WKNavigationResponse,
             didBecome download: WKDownload
         ) {
-
-            print("RESPONSE DOWNLOAD STARTED")
-
             download.delegate = self
         }
 
@@ -320,7 +393,6 @@ private struct ChatGPTWebView: UIViewRepresentable {
             decidePolicyFor navigationAction: WKNavigationAction,
             decisionHandler: @escaping (WKNavigationActionPolicy) -> Void
         ) {
-
             if navigationAction.shouldPerformDownload {
                 decisionHandler(.download)
             } else {
@@ -333,7 +405,6 @@ private struct ChatGPTWebView: UIViewRepresentable {
             decidePolicyFor navigationResponse: WKNavigationResponse,
             decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void
         ) {
-
             if navigationResponse.canShowMIMEType {
                 decisionHandler(.allow)
             } else {
@@ -341,7 +412,7 @@ private struct ChatGPTWebView: UIViewRepresentable {
             }
         }
 
-        // MARK: - Download Destination
+        // MARK: - Download confirmation
 
         func download(
             _ download: WKDownload,
@@ -349,7 +420,6 @@ private struct ChatGPTWebView: UIViewRepresentable {
             suggestedFilename: String,
             completionHandler: @escaping (URL?) -> Void
         ) {
-
             let alert = UIAlertController(
                 title: "Tải xuống tệp?",
                 message: """
@@ -365,7 +435,6 @@ private struct ChatGPTWebView: UIViewRepresentable {
                     title: "Hủy",
                     style: .cancel
                 ) { _ in
-
                     completionHandler(nil)
                 }
             )
@@ -376,51 +445,37 @@ private struct ChatGPTWebView: UIViewRepresentable {
                     style: .default
                 ) { [weak self, weak download] _ in
 
-                    guard
-                        let self,
-                        let download
-                    else {
+                    guard let self, let download else {
                         completionHandler(nil)
                         return
                     }
 
-                    do {
-                        self.createDownloadsDirectory()
+                    self.createDownloadsDirectory()
 
-                        let destination = self.uniqueDestination(
-                            filename: suggestedFilename
-                        )
+                    let destination = self.uniqueDestination(
+                        filename: suggestedFilename
+                    )
 
-                        self.activeDownloads[
-                            ObjectIdentifier(download)
-                        ] = destination
+                    self.activeDownloads[
+                        ObjectIdentifier(download)
+                    ] = destination
 
-                        print("DOWNLOAD DESTINATION:")
-                        print(destination.path)
-
-                        completionHandler(destination)
-
-                    } catch {
-                        print("DESTINATION ERROR: \(error)")
-                        completionHandler(nil)
-                    }
+                    completionHandler(destination)
                 }
             )
 
             present(alert)
         }
 
-        // MARK: - Download Finished
+        // MARK: - Download finished
 
         func downloadDidFinish(_ download: WKDownload) {
-
             let key = ObjectIdentifier(download)
-            let destination = activeDownloads.removeValue(
-                forKey: key
-            )
 
-            guard let destination else {
-                showError("Không xác định được vị trí lưu tệp.")
+            guard let destination = activeDownloads.removeValue(
+                forKey: key
+            ) else {
+                showError("Không xác định được vị trí tệp đã tải.")
                 return
             }
 
@@ -428,108 +483,55 @@ private struct ChatGPTWebView: UIViewRepresentable {
                 atPath: destination.path
             )
 
-            if exists {
-
-                let attributes = try? FileManager.default.attributesOfItem(
-                    atPath: destination.path
-                )
-
-                let size = attributes?[.size] as? Int64 ?? 0
-
-                print("DOWNLOAD SUCCESS")
-                print(destination.path)
-                print("SIZE: \(size) bytes")
-
-                if size > 0 {
-                    showSavedAlert(
-                        filename: destination.lastPathComponent,
-                        path: destination.path
-                    )
-                } else {
-                    showError("Tệp được tạo nhưng có dung lượng 0 byte.")
-                }
-
-            } else {
-
-                print("FILE DOES NOT EXIST")
-                showError(
-                    "WebKit báo tải xong nhưng không tìm thấy tệp tại:\n\(destination.path)"
-                )
+            guard exists else {
+                showError("Không tìm thấy tệp sau khi tải.")
+                return
             }
-        }
 
-        // MARK: - Download Failed
+            let attributes = try? FileManager.default.attributesOfItem(
+                atPath: destination.path
+            )
+
+            let size = attributes?[.size] as? Int64 ?? 0
+
+            guard size > 0 else {
+                showError("Tệp tải xuống có dung lượng 0 byte.")
+                return
+            }
+
+            showMessage(
+                title: "Tải xuống thành công",
+                message: """
+                \(destination.lastPathComponent)
+
+                Đã lưu vào:
+                Tệp → Trên iPhone của tôi → ChatGPT → Downloads
+
+                Dung lượng: \(ByteCountFormatter.string(
+                    fromByteCount: size,
+                    countStyle: .file
+                ))
+                """
+            )
+        }
 
         func download(
             _ download: WKDownload,
             didFailWithError error: Error,
             resumeData: Data?
         ) {
-
             activeDownloads.removeValue(
                 forKey: ObjectIdentifier(download)
             )
 
-            print("DOWNLOAD FAILED:")
-            print(error.localizedDescription)
-
             showError(
-                "Không thể tải tệp:\n\(error.localizedDescription)"
+                "Tải xuống thất bại: \(error.localizedDescription)"
             )
         }
 
-        // MARK: - Save Blob
+        // MARK: - File utilities
 
-        private func saveBlobFile(
-            _ data: Data,
-            filename: String
-        ) {
-
-            do {
-                createDownloadsDirectory()
-
-                let destination = uniqueDestination(
-                    filename: filename
-                )
-
-                try data.write(
-                    to: destination,
-                    options: .atomic
-                )
-
-                let exists = FileManager.default.fileExists(
-                    atPath: destination.path
-                )
-
-                guard exists else {
-                    showError("Không tìm thấy tệp sau khi lưu.")
-                    return
-                }
-
-                let size = Int64(data.count)
-
-                print("BLOB SAVED:")
-                print(destination.path)
-                print("SIZE: \(size) bytes")
-
-                showSavedAlert(
-                    filename: destination.lastPathComponent,
-                    path: destination.path
-                )
-
-            } catch {
-                showError(
-                    "Không thể lưu tệp:\n\(error.localizedDescription)"
-                )
-            }
-        }
-
-        // MARK: - Unique File Name
-
-        private func uniqueDestination(
-            filename: String
-        ) -> URL {
-
+        private func uniqueDestination(filename: String) -> URL {
             let safeName = Self.safeFilename(filename)
 
             var destination = downloadsDirectory
@@ -538,16 +540,9 @@ private struct ChatGPTWebView: UIViewRepresentable {
             if FileManager.default.fileExists(
                 atPath: destination.path
             ) {
-
-                let base = destination
-                    .deletingPathExtension()
-                    .lastPathComponent
-
+                let base = destination.deletingPathExtension().lastPathComponent
                 let ext = destination.pathExtension
-
-                let suffix = String(
-                    UUID().uuidString.prefix(8)
-                )
+                let suffix = String(UUID().uuidString.prefix(8))
 
                 let newName = ext.isEmpty
                     ? "\(base)-\(suffix)"
@@ -560,10 +555,7 @@ private struct ChatGPTWebView: UIViewRepresentable {
             return destination
         }
 
-        private static func safeFilename(
-            _ filename: String
-        ) -> String {
-
+        private static func safeFilename(_ filename: String) -> String {
             let cleaned = filename
                 .replacingOccurrences(of: "/", with: "_")
                 .replacingOccurrences(of: "\\", with: "_")
@@ -572,104 +564,40 @@ private struct ChatGPTWebView: UIViewRepresentable {
             return cleaned.isEmpty ? "download" : cleaned
         }
 
-        private static func jsonString(
-            _ value: String
-        ) -> String {
+        private static func filenameFromURL(_ value: String) -> String {
+            guard
+                let components = URLComponents(string: value),
+                let name = components.path
+                    .split(separator: "/")
+                    .last
+            else {
+                return "image.jpg"
+            }
 
+            let filename = String(name)
+
+            if filename.contains(".") {
+                return safeFilename(filename)
+            }
+
+            return "\(filename).jpg"
+        }
+
+        private static func jsonString(_ value: String) -> String {
             guard
                 let data = try? JSONSerialization.data(
                     withJSONObject: [value],
                     options: [.fragmentsAllowed]
                 ),
-                let result = String(
-                    data: data,
-                    encoding: .utf8
-                )
+                let result = String(data: data, encoding: .utf8)
             else {
                 return "\"\""
             }
 
-            return String(
-                result.dropFirst().dropLast()
-            )
+            return String(result.dropFirst().dropLast())
         }
 
-        // MARK: - Alerts
-
-        private func present(
-            _ alert: UIAlertController
-        ) {
-
-            DispatchQueue.main.async { [weak self] in
-
-                guard
-                    let self,
-                    let root = self.webView?.window?.rootViewController
-                else {
-                    print("ALERT ERROR: Root controller unavailable")
-                    return
-                }
-
-                var presenter = root
-
-                while let presented = presenter.presentedViewController {
-                    presenter = presented
-                }
-
-                presenter.present(
-                    alert,
-                    animated: true
-                )
-            }
-        }
-
-        private func showSavedAlert(
-            filename: String,
-            path: String
-        ) {
-
-            let alert = UIAlertController(
-                title: "Tải xuống thành công",
-                message: """
-                Tệp: \(filename)
-
-                Đã lưu tại:
-                \(path)
-
-                Mở Tệp → Trên iPhone của tôi → ChatGPT → Downloads.
-                """,
-                preferredStyle: .alert
-            )
-
-            alert.addAction(
-                UIAlertAction(
-                    title: "Đóng",
-                    style: .default
-                )
-            )
-
-            present(alert)
-        }
-
-        private func showError(_ message: String) {
-
-            let alert = UIAlertController(
-                title: "Lỗi tải xuống",
-                message: message,
-                preferredStyle: .alert
-            )
-
-            alert.addAction(
-                UIAlertAction(
-                    title: "Đóng",
-                    style: .default
-                )
-            )
-
-            present(alert)
-        }
-
-        // MARK: - New Windows
+        // MARK: - New windows
 
         func webView(
             _ webView: WKWebView,
@@ -680,13 +608,65 @@ private struct ChatGPTWebView: UIViewRepresentable {
 
             if navigationAction.targetFrame == nil,
                let url = navigationAction.request.url {
-
-                webView.load(
-                    URLRequest(url: url)
-                )
+                webView.load(URLRequest(url: url))
             }
 
             return nil
+        }
+
+        // MARK: - Alerts
+
+        private func present(_ alert: UIAlertController) {
+            DispatchQueue.main.async { [weak self] in
+                guard
+                    let self,
+                    let root = self.webView?.window?.rootViewController
+                else {
+                    return
+                }
+
+                var presenter = root
+
+                while let presented = presenter.presentedViewController {
+                    presenter = presented
+                }
+
+                if let popover = alert.popoverPresentationController {
+                    popover.sourceView = presenter.view
+                    popover.sourceRect = CGRect(
+                        x: presenter.view.bounds.midX,
+                        y: presenter.view.bounds.midY,
+                        width: 1,
+                        height: 1
+                    )
+                }
+
+                presenter.present(alert, animated: true)
+            }
+        }
+
+        private func showMessage(
+            title: String,
+            message: String
+        ) {
+            let alert = UIAlertController(
+                title: title,
+                message: message,
+                preferredStyle: .alert
+            )
+
+            alert.addAction(
+                UIAlertAction(title: "Đóng", style: .default)
+            )
+
+            present(alert)
+        }
+
+        private func showError(_ message: String) {
+            showMessage(
+                title: "Không thể thực hiện",
+                message: message
+            )
         }
     }
 }
