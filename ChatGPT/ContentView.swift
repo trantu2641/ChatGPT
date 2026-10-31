@@ -107,20 +107,40 @@ struct WebView: UIViewRepresentable {
 
         context.coordinator.webView = webView
 
+        // MARK: WebView performance
+
         webView.isOpaque = false
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
+
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.scrollView.alwaysBounceVertical = true
+
+        // Nhận thao tác chạm ngay, không chờ nhận diện cuộn.
+        webView.scrollView.delaysContentTouches = false
+        webView.scrollView.panGestureRecognizer.delaysTouchesBegan = false
+
+        // Giữ khả năng cuộn và vuốt bình thường.
+        webView.scrollView.canCancelContentTouches = true
+        webView.scrollView.isDirectionalLockEnabled = false
+        webView.scrollView.bounces = true
+
         webView.allowsBackForwardNavigationGestures = true
 
-        webView.load(
-            URLRequest(
-                url: URL(string: "https://chatgpt.com/")!,
-                cachePolicy: .useProtocolCachePolicy,
-                timeoutInterval: 60
-            )
+        // Không tự động đóng bàn phím khi cuộn.
+        webView.scrollView.keyboardDismissMode = .none
+
+        // MARK: Load ChatGPT
+
+        var request = URLRequest(
+            url: URL(string: "https://chatgpt.com/")!,
+            cachePolicy: .useProtocolCachePolicy,
+            timeoutInterval: 60
         )
+
+        request.httpShouldHandleCookies = true
+
+        webView.load(request)
 
         return webView
     }
@@ -561,7 +581,6 @@ struct WebView: UIViewRepresentable {
                 }
 
                 self.isPresentingController = true
-
                 presenter.present(alert, animated: true)
             }
         }
@@ -590,7 +609,6 @@ struct WebView: UIViewRepresentable {
                 )
 
                 self.isPresentingController = true
-
                 presenter.present(alert, animated: true)
             }
         }
